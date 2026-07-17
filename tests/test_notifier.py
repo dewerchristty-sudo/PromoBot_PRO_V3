@@ -96,7 +96,10 @@ class NotifierTest(unittest.TestCase):
         self.assertIn("Mais achadinhos da ViVi na Shopee:", mensagem)
 
     @patch.dict("os.environ", {
-        "MERCADOLIVRE_AFFILIATE_MAP": "MLB18571345=https://meli.la/2U97MV2",
+        "MERCADOLIVRE_AFFILIATE_MAP": (
+            "MLB111=https://meli.la/outro;"
+            "MLB18571345=https://meli.la/2U97MV2"
+        ),
     })
     def test_formata_link_afiliado_mercado_livre_por_produto(self):
 

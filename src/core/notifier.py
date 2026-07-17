@@ -170,7 +170,9 @@ class Notifier:
         if not product_id:
             return ""
 
-        for entry in (mapping or "").splitlines():
+        entries = re.split(r"[\n;]+", mapping or "")
+
+        for entry in entries:
 
             if "=" not in entry:
                 continue
