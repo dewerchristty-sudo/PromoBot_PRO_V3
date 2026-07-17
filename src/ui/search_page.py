@@ -1,0 +1,223 @@
+import threading
+import tkinter as tk
+
+import customtkinter as ctk
+
+from src.core.store_manager import StoreManager
+from src.scraper import Parser
+
+
+class SearchPage(ctk.CTkFrame):
+
+    def __init__(self, master, database):
+        super().__init__(master)
+
+        self.database = database
+
+        self.lojas = {}
+
+        for nome in StoreManager.stable_store_names():
+            self.lojas[nome] = tk.BooleanVar(value=True)
+
+        for nome in StoreManager.experimental_store_names():
+            self.lojas[nome] = tk.BooleanVar(value=False)
+
+        self.criar_interface()
+
+    def criar_interface(self):
+
+        ctk.CTkLabel(
+            self,
+            text="Buscar Produtos",
+            font=("Arial", 30, "bold")
+        ).pack(pady=(20, 8))
+
+        ctk.CTkLabel(
+            self,
+            text="Pesquise em marketplaces e lojas de hardware com foco em menor preco.",
+            font=("Arial", 14)
+        ).pack(pady=(0, 18))
+
+        barra = ctk.CTkFrame(self)
+        barra.pack(fill="x", padx=20)
+
+        self.entry = ctk.CTkEntry(
+            barra,
+            placeholder_text="Digite o produto...",
+            height=40
+        )
+        self.entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.entry.bind("<Return>", lambda _event: self.iniciar_busca())
+
+        self.botao = ctk.CTkButton(
+            barra,
+            text="Pesquisar",
+            width=140,
+            command=self.iniciar_busca
+        )
+        self.botao.pack(side="left")
+
+        lojas_frame = ctk.CTkFrame(self)
+        lojas_frame.pack(fill="x", padx=20, pady=(10, 0))
+
+        ctk.CTkLabel(
+            lojas_frame,
+            text="Lojas:",
+            font=("Arial", 14, "bold")
+        ).pack(side="left", padx=(10, 12), pady=10)
+
+        for nome, variavel in self.lojas.items():
+
+            ctk.CTkCheckBox(
+                lojas_frame,
+                text=nome,
+                variable=variavel
+            ).pack(side="left", padx=(0, 12), pady=10)
+
+        self.status = ctk.CTkLabel(
+            self,
+            text="Pronto para pesquisar.",
+            anchor="w"
+        )
+        self.status.pack(fill="x", padx=20, pady=(12, 0))
+
+        self.resultados = ctk.CTkTextbox(self)
+        self.resultados.pack(fill="both", expand=True, padx=20, pady=20)
+
+    # =======================================
+
+    def escrever(self, texto):
+
+        self.resultados.insert("end", texto + "\n")
+        self.resultados.see("end")
+
+    # =======================================
+
+    def log_threadsafe(self, texto):
+
+        self.after(0, lambda: self.escrever(texto))
+
+    # =======================================
+
+    def limpar(self):
+
+        self.resultados.delete("1.0", "end")
+
+    # =======================================
+
+    def iniciar_busca(self):
+
+        if self.botao.cget("state") == "disabled":
+            return
+
+        produto = self.entry.get().strip()
+
+        self.limpar()
+
+        if not produto:
+
+            self.escrever("Digite um produto para pesquisar.")
+            self.status.configure(text="Informe um termo de busca.")
+            return
+
+        self.botao.configure(state="disabled", text="Pesquisando...")
+        self.status.configure(text=f"Pesquisando por: {produto}")
+
+        lojas_selecionadas = [
+            nome for nome, variavel in self.lojas.items()
+            if variavel.get()
+        ]
+
+        if not lojas_selecionadas:
+
+            self.escrever("Selecione ao menos uma loja.")
+            self.botao.configure(state="normal", text="Pesquisar")
+            self.status.configure(text="Nenhuma loja selecionada.")
+            return
+
+        threading.Thread(
+            target=self.pesquisar,
+            args=(produto, lojas_selecionadas),
+            daemon=True
+        ).start()
+
+    # =======================================
+
+    def pesquisar(self, produto, lojas_selecionadas):
+
+        try:
+
+            store_manager = StoreManager(
+                progress_callback=self.log_threadsafe,
+                enabled_stores=lojas_selecionadas
+            )
+
+            resultados = store_manager.search_all(produto)
+            self.database.salvar_lista(resultados)
+
+            self.after(
+                0,
+                lambda: self.mostrar_resultados(resultados)
+            )
+
+        except Exception as erro:
+
+            self.after(
+                0,
+                lambda: self.escrever(f"Erro na busca: {erro}")
+            )
+
+        finally:
+
+            self.after(
+                0,
+                lambda: self.botao.configure(
+                    state="normal",
+                    text="Pesquisar"
+                )
+            )
+
+    # =======================================
+
+    def mostrar_resultados(self, resultados):
+
+        self.status.configure(
+            text=f"{len(resultados)} produtos encontrados e salvos."
+        )
+
+        self.escrever("")
+        self.escrever(f"{len(resultados)} produtos encontrados.")
+        self.escrever("")
+
+        if not resultados:
+
+            self.escrever(
+                "Nenhum resultado retornou. Tente outro termo ou verifique sua conexao."
+            )
+            return
+
+        resultados_ordenados = sorted(
+            resultados,
+            key=lambda item: Parser.price_to_float(item.get("preco", "")) or 999999999
+        )
+
+        melhor = resultados_ordenados[0]
+        melhor_preco = Parser.price_to_float(melhor.get("preco", ""))
+
+        if melhor_preco > 0:
+
+            self.escrever(
+                f"Menor preco: R$ {melhor['preco']} "
+                f"em {melhor['loja']} - {melhor['titulo']}"
+            )
+            self.escrever("")
+
+        for item in resultados_ordenados:
+
+            self.escrever(
+                f"[{item['loja']}]\n"
+                f"{item['titulo']}\n"
+                f"Preco: {item['preco'] or 'Nao informado'}\n"
+                f"{item['link']}\n"
+                "------------------------------------------------------------"
+            )

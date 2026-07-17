@@ -1,0 +1,12 @@
+customtkinter
+pillow
+python-dotenv
+loguru
+sqlalchemy
+playwright
+requests
+beautifulsoup4
+lxml
+pandas
+openpyxl
+pyinstaller
