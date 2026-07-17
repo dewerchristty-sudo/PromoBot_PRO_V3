@@ -11,7 +11,7 @@ class BaseStore(StoreScraper, ABC):
         if browser_manager is None:
 
             browser_manager = BrowserManager(
-                headless=False
+                headless=True
             )
 
         super().__init__(browser_manager)

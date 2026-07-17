@@ -1,6 +1,7 @@
 import unittest
 
 from src.core.store_manager import StoreManager
+from src.stores.mercado_livre import MercadoLivre
 
 
 class StoresTest(unittest.TestCase):
@@ -26,6 +27,12 @@ class StoresTest(unittest.TestCase):
         self.assertIn("Americanas", StoreManager.experimental_store_names())
         self.assertIn("Terabyte", StoreManager.experimental_store_names())
         self.assertIn("Shopee", StoreManager.experimental_store_names())
+
+    def test_lojas_usam_navegador_oculto_por_padrao(self):
+
+        store = MercadoLivre()
+
+        self.assertTrue(store.browser_manager.headless)
 
     def test_sanitize_remove_resultados_invalidos(self):
 

@@ -3,7 +3,7 @@ from playwright.sync_api import sync_playwright
 
 class BrowserManager:
 
-    def __init__(self, headless=False):
+    def __init__(self, headless=True):
 
         self.headless = headless
 
