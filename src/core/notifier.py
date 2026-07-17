@@ -132,6 +132,14 @@ class Notifier:
         if not self.is_shopee(item):
             return link
 
+        mapped = self.mapped_shopee_affiliate_link(
+            link,
+            os.getenv("SHOPEE_AFFILIATE_MAP", "")
+        )
+
+        if mapped:
+            return mapped
+
         template = os.getenv("SHOPEE_AFFILIATE_TEMPLATE", "").strip()
 
         if not template:
@@ -144,6 +152,37 @@ class Notifier:
             url_encoded=quote(link, safe=""),
             affiliate_id=affiliate_id,
         )
+
+    def mapped_shopee_affiliate_link(self, link, mapping):
+
+        keys = self.shopee_mapping_keys(link)
+
+        for key, value in self.mapping_entries(mapping):
+
+            if key in keys:
+                return value
+
+        return ""
+
+    def shopee_mapping_keys(self, link):
+
+        keys = {self.normalize_url(link)}
+
+        short_match = re.search(
+            r"(?:br\.shp\.ee|s\.shopee\.com\.br)/([^/?#]+)",
+            link or "",
+            re.IGNORECASE
+        )
+
+        if short_match:
+            keys.add(short_match.group(1))
+
+        item_match = re.search(r"(?:fromItem=|-i\.\d+\.)(\d+)", link or "")
+
+        if item_match:
+            keys.add(item_match.group(1))
+
+        return {key for key in keys if key}
 
     def is_shopee(self, item):
 
@@ -170,6 +209,15 @@ class Notifier:
         if not product_id:
             return ""
 
+        for key, value in self.mapping_entries(mapping):
+
+            if key.upper() == product_id:
+                return value
+
+        return ""
+
+    def mapping_entries(self, mapping):
+
         entries = re.split(r"[\n;]+", mapping or "")
 
         for entry in entries:
@@ -178,11 +226,20 @@ class Notifier:
                 continue
 
             key, value = entry.split("=", 1)
+            key = self.normalize_url(key.strip())
+            value = value.strip()
 
-            if key.strip().upper() == product_id:
-                return value.strip()
+            if key and value:
+                yield key, value
 
-        return ""
+    def normalize_url(self, value):
+
+        value = (value or "").strip()
+
+        if not value.startswith("http"):
+            return value
+
+        return value.split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
     def product_id(self, link):
 

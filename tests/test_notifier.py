@@ -96,6 +96,41 @@ class NotifierTest(unittest.TestCase):
         self.assertIn("Mais achadinhos da ViVi na Shopee:", mensagem)
 
     @patch.dict("os.environ", {
+        "SHOPEE_AFFILIATE_MAP": (
+            "bvx75s95=https://s.shopee.com.br/1Vxfk8gpbZ;"
+            "19899665250=https://s.shopee.com.br/3g2ANbr3rp"
+        ),
+    })
+    def test_formata_link_afiliado_shopee_por_mapeamento(self):
+
+        notifier = Notifier()
+
+        mensagem_curta = notifier.format_alert({
+            "termo": "",
+            "preco_alvo": None,
+            "loja": "Shopee",
+            "preco": "21,99",
+            "preco_valor": 21.99,
+            "titulo": "Produto Shopee",
+            "link": "https://br.shp.ee/bvx75s95?smtt=0.0.9",
+        })
+        mensagem_item = notifier.format_alert({
+            "termo": "",
+            "preco_alvo": None,
+            "loja": "Shopee",
+            "preco": "21,99",
+            "preco_valor": 21.99,
+            "titulo": "Produto Shopee",
+            "link": (
+                "https://shopee.com.br/flash_sale"
+                "?fromItem=19899665250&promotionId=480859748782201"
+            ),
+        })
+
+        self.assertIn("https://s.shopee.com.br/1Vxfk8gpbZ", mensagem_curta)
+        self.assertIn("https://s.shopee.com.br/3g2ANbr3rp", mensagem_item)
+
+    @patch.dict("os.environ", {
         "MERCADOLIVRE_AFFILIATE_MAP": (
             "MLB111=https://meli.la/outro;"
             "MLB18571345=https://meli.la/2U97MV2"
