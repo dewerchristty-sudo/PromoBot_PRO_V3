@@ -96,6 +96,27 @@ class NotifierTest(unittest.TestCase):
         self.assertIn("Mais achadinhos da ViVi na Shopee:", mensagem)
 
     @patch.dict("os.environ", {
+        "MERCADOLIVRE_AFFILIATE_MAP": "MLB18571345=https://meli.la/2U97MV2",
+    })
+    def test_formata_link_afiliado_mercado_livre_por_produto(self):
+
+        mensagem = Notifier().format_alert({
+            "termo": "",
+            "preco_alvo": None,
+            "loja": "Mercado Livre",
+            "preco": "129,90",
+            "preco_valor": 129.90,
+            "titulo": "Memoria RAM Kingston",
+            "link": (
+                "https://www.mercadolivre.com.br/memoria-ram/p/"
+                "MLB18571345"
+            ),
+        })
+
+        self.assertIn("https://meli.la/2U97MV2", mensagem)
+        self.assertNotIn("https://www.mercadolivre.com.br/memoria-ram", mensagem)
+
+    @patch.dict("os.environ", {
         "TELEGRAM_BOT_TOKEN": "token",
         "TELEGRAM_CHAT_ID": "123",
         "WHATSAPP_PROVIDER": "",

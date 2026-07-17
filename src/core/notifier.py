@@ -1,4 +1,5 @@
 import os
+import re
 from urllib.parse import quote
 
 import requests
@@ -90,11 +91,43 @@ class Notifier:
                 storefront,
             ])
 
+        storefront = os.getenv("MERCADOLIVRE_AFFILIATE_STOREFRONT", "").strip()
+
+        if self.is_mercado_livre(item) and storefront and storefront != link:
+            lines.extend([
+                "",
+                "Mais achadinhos da ViVi no Mercado Livre:",
+                storefront,
+            ])
+
         return lines
 
     def affiliate_link(self, item):
 
         link = self.value(item, "link", "") or ""
+
+        if self.is_mercado_livre(item):
+            mapped = self.mapped_affiliate_link(
+                link,
+                os.getenv("MERCADOLIVRE_AFFILIATE_MAP", "")
+            )
+
+            if mapped:
+                return mapped
+
+            template = os.getenv("MERCADOLIVRE_AFFILIATE_TEMPLATE", "").strip()
+
+            if template:
+                affiliate_id = os.getenv("MERCADOLIVRE_AFFILIATE_ID", "").strip()
+
+                return template.format(
+                    url=link,
+                    url_encoded=quote(link, safe=""),
+                    affiliate_id=affiliate_id,
+                    product_id=self.product_id(link),
+                )
+
+            return link
 
         if not self.is_shopee(item):
             return link
@@ -118,6 +151,45 @@ class Notifier:
         link = (self.value(item, "link", "") or "").strip().lower()
 
         return loja == "shopee" or "shopee.com.br" in link
+
+    def is_mercado_livre(self, item):
+
+        loja = (self.value(item, "loja", "") or "").strip().lower()
+        link = (self.value(item, "link", "") or "").strip().lower()
+
+        return (
+            loja == "mercado livre"
+            or "mercadolivre.com" in link
+            or "produto.mercadolivre.com" in link
+        )
+
+    def mapped_affiliate_link(self, link, mapping):
+
+        product_id = self.product_id(link)
+
+        if not product_id:
+            return ""
+
+        for entry in (mapping or "").splitlines():
+
+            if "=" not in entry:
+                continue
+
+            key, value = entry.split("=", 1)
+
+            if key.strip().upper() == product_id:
+                return value.strip()
+
+        return ""
+
+    def product_id(self, link):
+
+        match = re.search(r"(MLB\d+)", link or "", re.IGNORECASE)
+
+        if not match:
+            return ""
+
+        return match.group(1).upper()
 
     def format_price_lines(self, item):
 
