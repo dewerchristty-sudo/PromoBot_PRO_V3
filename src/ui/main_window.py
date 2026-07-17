@@ -267,6 +267,7 @@ class MainWindow(ctk.CTk):
     def iniciar_monitor_automatico(self):
 
         ativos = self.database.listar_monitoramentos(somente_ativos=True)
+        self.monitor_runner.notify_pending_async()
 
         if ativos and not self.monitor_runner.running:
             self.monitor_runner.start()

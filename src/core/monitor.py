@@ -1,5 +1,4 @@
 import threading
-import time
 
 from src.core.notifier import Notifier
 from src.core.store_manager import StoreManager
@@ -15,6 +14,7 @@ class MonitorRunner:
         self.thread = None
         self.running = False
         self.notifier = Notifier()
+        self.notification_lock = threading.Lock()
 
     def start(self):
 
@@ -38,6 +38,8 @@ class MonitorRunner:
         self.progress_callback = progress_callback
 
     def run_once(self):
+
+        self.notify_pending_alerts()
 
         total = 0
 
@@ -97,14 +99,23 @@ class MonitorRunner:
 
     def notify_pending_alerts(self):
 
-        alerts = self.database.alertas_pendentes()
+        with self.notification_lock:
 
-        if not alerts:
-            self.log("Nenhuma promocao nova para notificar.")
-            return
+            alerts = self.database.alertas_pendentes()
 
-        result = self.notifier.send_alerts(alerts, self.database)
-        self.log(f"Notificacao automatica: {result}")
+            if not alerts:
+                self.log("Nenhuma promocao nova para notificar.")
+                return
+
+            result = self.notifier.send_alerts(alerts, self.database)
+            self.log(f"Notificacao automatica: {result}")
+
+    def notify_pending_async(self):
+
+        threading.Thread(
+            target=self.notify_pending_alerts,
+            daemon=True
+        ).start()
 
     def parse_stores(self, text):
 
