@@ -16,53 +16,60 @@ class BrowserManager:
         if self.context is not None:
             return self.context
 
-        self.playwright = sync_playwright().start()
+        try:
 
-        self.browser = self.playwright.chromium.launch(
+            self.playwright = sync_playwright().start()
 
-            headless=self.headless,
+            self.browser = self.playwright.chromium.launch(
 
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--start-maximized",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-            ]
+                headless=self.headless,
 
-        )
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--start-maximized",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ]
 
-        self.context = self.browser.new_context(
+            )
 
-            viewport={
-                "width": 1366,
-                "height": 768
-            },
+            self.context = self.browser.new_context(
 
-            locale="pt-BR",
+                viewport={
+                    "width": 1366,
+                    "height": 768
+                },
 
-            timezone_id="America/Sao_Paulo",
+                locale="pt-BR",
 
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/138.0.0.0 Safari/537.36"
-            ),
+                timezone_id="America/Sao_Paulo",
 
-            java_script_enabled=True,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/138.0.0.0 Safari/537.36"
+                ),
 
-            ignore_https_errors=True,
+                java_script_enabled=True,
 
-        )
+                ignore_https_errors=True,
 
-        self.context.set_extra_http_headers({
+            )
 
-            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+            self.context.set_extra_http_headers({
 
-            "Upgrade-Insecure-Requests": "1",
+                "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
 
-            "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
 
-        })
+                "DNT": "1",
+
+            })
+
+        except Exception:
+
+            self.close()
+            raise
 
         return self.context
 
