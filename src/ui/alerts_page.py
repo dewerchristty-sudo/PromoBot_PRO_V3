@@ -214,7 +214,7 @@ class AlertsPage(ctk.CTkFrame):
 
     def notificar_agora(self):
 
-        disparos = self.database.alertas_disparados()
-        resultado = self.notifier.send_alerts(disparos)
+        disparos = self.database.alertas_pendentes()
+        resultado = self.notifier.send_alerts(disparos, self.database)
 
         messagebox.showinfo("Notificacoes", resultado)

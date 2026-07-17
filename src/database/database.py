@@ -126,6 +126,24 @@ class Database:
             )
             """)
 
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notificacoes_enviadas(
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                alerta_id INTEGER,
+
+                link TEXT,
+
+                preco_valor REAL DEFAULT 0,
+
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                UNIQUE(alerta_id, link)
+
+            )
+            """)
+
             self.conn.commit()
 
             self.migrar_tabelas()
@@ -469,6 +487,88 @@ class Database:
             """)
 
             return self.cursor.fetchall()
+
+    # ============================================
+
+    def alertas_pendentes(self):
+
+        with self.lock:
+
+            self.cursor.execute("""
+
+            SELECT
+                a.id AS alerta_id,
+                a.termo,
+                a.preco_alvo,
+                p.loja,
+                p.titulo,
+                p.preco,
+                p.preco_valor,
+                p.link,
+                p.imagem
+
+            FROM alertas a
+
+            JOIN produtos p
+                ON (
+                    a.termo = ''
+                    OR p.titulo LIKE '%' || a.termo || '%'
+                )
+                AND p.preco_valor > 0
+                AND (
+                    (
+                        a.preco_alvo IS NOT NULL
+                        AND p.preco_valor <= a.preco_alvo
+                    )
+                    OR (
+                        a.preco_alvo IS NULL
+                        AND p.promocao = 1
+                    )
+                )
+
+            LEFT JOIN notificacoes_enviadas n
+                ON n.alerta_id = a.id
+                AND n.link = p.link
+
+            WHERE a.ativo = 1
+                AND n.id IS NULL
+
+            ORDER BY
+                p.preco_valor ASC,
+                p.id DESC
+
+            """)
+
+            return self.cursor.fetchall()
+
+    # ============================================
+
+    def marcar_notificacoes_enviadas(self, alertas):
+
+        with self.lock:
+
+            for alerta in alertas:
+
+                alerta_id = alerta["alerta_id"]
+                link = alerta["link"]
+                preco_valor = alerta["preco_valor"]
+
+                if not alerta_id or not link:
+                    continue
+
+                self.cursor.execute("""
+
+                INSERT OR IGNORE INTO notificacoes_enviadas(
+                    alerta_id,
+                    link,
+                    preco_valor
+                )
+
+                VALUES(?,?,?)
+
+                """, (alerta_id, link, preco_valor))
+
+            self.conn.commit()
 
     # ============================================
 

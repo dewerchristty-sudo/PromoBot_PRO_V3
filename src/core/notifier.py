@@ -22,7 +22,7 @@ class Notifier:
 
         return channels
 
-    def send_alerts(self, alerts):
+    def send_alerts(self, alerts, database=None):
 
         if not alerts:
             return "Nenhum alerta disparado."
@@ -43,6 +43,8 @@ class Notifier:
             errors.append(f"WhatsApp: {error}")
 
         if sent:
+            if database is not None:
+                database.marcar_notificacoes_enviadas(alerts)
             return "Enviado por: " + ", ".join(sent)
 
         if errors:

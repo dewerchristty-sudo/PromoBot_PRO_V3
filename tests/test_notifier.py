@@ -304,6 +304,44 @@ class NotifierTest(unittest.TestCase):
             "local-key"
         )
 
+    @patch.dict("os.environ", {
+        "TELEGRAM_BOT_TOKEN": "",
+        "TELEGRAM_CHAT_ID": "",
+        "WHATSAPP_PROVIDER": "evolution",
+        "EVOLUTION_API_URL": "http://localhost:8080",
+        "EVOLUTION_INSTANCE": "promobot",
+        "EVOLUTION_API_KEY": "local-key",
+        "WHATSAPP_PHONES": "5511999999999",
+        "ZAPI_INSTANCE_ID": "",
+        "ZAPI_INSTANCE_TOKEN": "",
+        "ZAPI_CLIENT_TOKEN": "",
+    })
+    @patch("src.core.notifier.requests.post")
+    def test_marca_alertas_enviados_quando_envia_com_sucesso(self, post):
+
+        response = Mock()
+        response.raise_for_status.return_value = None
+        post.return_value = response
+        database = Mock()
+
+        alerts = [
+            {
+                "alerta_id": 1,
+                "termo": "",
+                "preco_alvo": None,
+                "loja": "Amazon",
+                "preco": "99,90",
+                "titulo": "Oferta Fone Bluetooth",
+                "link": "https://example.com/fone",
+                "imagem": "https://example.com/fone.jpg",
+            }
+        ]
+
+        resultado = Notifier().send_alerts(alerts, database)
+
+        self.assertEqual(resultado, "Enviado por: WhatsApp")
+        database.marcar_notificacoes_enviadas.assert_called_once_with(alerts)
+
 
 if __name__ == "__main__":
     unittest.main()
