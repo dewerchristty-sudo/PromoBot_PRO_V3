@@ -1,7 +1,5 @@
 from urllib.parse import quote_plus
 
-from bs4 import BeautifulSoup
-
 from src.stores.base_store import BaseStore
 
 
@@ -21,7 +19,7 @@ class Shopee(BaseStore):
 
         resultados = []
 
-        page = self.browser_manager.new_page()
+        page = self.browser_manager.new_page(stealth=False)
 
         try:
 
@@ -32,24 +30,33 @@ class Shopee(BaseStore):
 
             page.goto(
                 url,
-                wait_until="domcontentloaded",
-                timeout=60000
+                wait_until="load",
+                timeout=90000
             )
 
-            page.wait_for_timeout(7000)
+            page.wait_for_timeout(15000)
 
-            soup = BeautifulSoup(
-                page.content(),
-                "lxml"
+            cards = page.locator("a[href*='-i.']").evaluate_all(
+                """
+                elements => elements.slice(0, 40).map(anchor => {
+                    const image = Array.from(anchor.querySelectorAll("img"))
+                        .find(img => img.src && img.src.includes("susercontent"));
+
+                    return {
+                        href: anchor.href || anchor.getAttribute("href") || "",
+                        text: anchor.innerText || "",
+                        image: image ? image.src : "",
+                        imageAlt: image ? image.alt : ""
+                    };
+                })
+                """
             )
 
-            links = soup.select("a[href*='-i.'], a[href*='/product/']")
-
-            print(f"Produtos encontrados: {len(links)}")
+            print(f"Produtos encontrados: {len(cards)}")
 
             vistos = set()
 
-            for item in links[:40]:
+            for item in cards:
 
                 try:
 
@@ -61,38 +68,11 @@ class Shopee(BaseStore):
 
                     vistos.add(link)
 
-                    titulo = item.get("title", "")
+                    linhas = self.text_lines(item.get("text", ""))
+                    titulo = self.extract_title(linhas, item.get("imageAlt", ""))
+                    preco = self.extract_price(linhas)
 
-                    if not titulo:
-                        candidatos = [
-                            texto.strip()
-                            for texto in item.stripped_strings
-                            if len(texto.strip()) > 12
-                        ]
-
-                        titulo = candidatos[0] if candidatos else ""
-
-                    preco = ""
-
-                    for texto in item.stripped_strings:
-
-                        texto_limpo = texto.strip()
-
-                        if "R$" in texto_limpo:
-                            preco = self.price(texto_limpo)
-                            break
-
-                    imagem = ""
-                    img = item.select_one("img")
-
-                    if img:
-                        imagem = (
-                            img.get("src")
-                            or img.get("data-src")
-                            or ""
-                        )
-
-                    if titulo:
+                    if titulo and preco:
 
                         resultados.append({
 
@@ -100,7 +80,7 @@ class Shopee(BaseStore):
                             "titulo": titulo,
                             "preco": preco,
                             "link": link,
-                            "imagem": imagem
+                            "imagem": item.get("image", "")
 
                         })
 
@@ -119,3 +99,45 @@ class Shopee(BaseStore):
             page.close()
 
             self.browser_manager.close()
+
+    # ======================================================
+
+    def text_lines(self, text):
+
+        return [
+            line.strip()
+            for line in (text or "").splitlines()
+            if line.strip()
+        ]
+
+    # ======================================================
+
+    def extract_title(self, lines, image_alt=""):
+
+        for value in [image_alt, *lines]:
+
+            value = " ".join((value or "").split()).strip()
+
+            if len(value) < 12:
+                continue
+
+            if value == "flag-label" or "R$" in value:
+                continue
+
+            return value[:240]
+
+        return ""
+
+    # ======================================================
+
+    def extract_price(self, lines):
+
+        for index, line in enumerate(lines):
+
+            if line == "R$" and index + 1 < len(lines):
+                return self.price(lines[index + 1])
+
+            if "R$" in line:
+                return self.price(line)
+
+        return ""

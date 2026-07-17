@@ -16,6 +16,7 @@ class StoreManager:
         "Mercado Livre",
         "Amazon",
         "Kabum",
+        "Shopee",
     ]
 
     EXPERIMENTAL_STORES = [
@@ -24,7 +25,6 @@ class StoreManager:
         "Pichau",
         "Magalu",
         "Casas Bahia",
-        "Shopee",
     ]
 
     def __init__(self, progress_callback=None, enabled_stores=None):

@@ -20,17 +20,22 @@ class BrowserManager:
 
             self.playwright = sync_playwright().start()
 
+            args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ]
+
+            if self.headless:
+                args.append("--headless=new")
+            else:
+                args.append("--start-maximized")
+
             self.browser = self.playwright.chromium.launch(
 
                 headless=self.headless,
 
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--start-maximized",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                ]
-
+                args=args
             )
 
             self.context = self.browser.new_context(
@@ -56,16 +61,6 @@ class BrowserManager:
 
             )
 
-            self.context.set_extra_http_headers({
-
-                "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-
-                "Upgrade-Insecure-Requests": "1",
-
-                "DNT": "1",
-
-            })
-
         except Exception:
 
             self.close()
@@ -73,13 +68,14 @@ class BrowserManager:
 
         return self.context
 
-    def new_page(self):
+    def new_page(self, stealth=True):
 
         context = self.start()
 
         page = context.new_page()
 
-        page.add_init_script("""
+        if stealth:
+            page.add_init_script("""
 
 Object.defineProperty(navigator, 'webdriver', {
     get: () => undefined

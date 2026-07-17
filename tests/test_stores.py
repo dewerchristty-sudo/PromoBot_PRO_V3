@@ -2,6 +2,7 @@ import unittest
 
 from src.core.store_manager import StoreManager
 from src.stores.mercado_livre import MercadoLivre
+from src.stores.shopee import Shopee
 
 
 class StoresTest(unittest.TestCase):
@@ -24,15 +25,28 @@ class StoresTest(unittest.TestCase):
         self.assertIn("Mercado Livre", StoreManager.stable_store_names())
         self.assertIn("Amazon", StoreManager.stable_store_names())
         self.assertIn("Kabum", StoreManager.stable_store_names())
+        self.assertIn("Shopee", StoreManager.stable_store_names())
         self.assertIn("Americanas", StoreManager.experimental_store_names())
         self.assertIn("Terabyte", StoreManager.experimental_store_names())
-        self.assertIn("Shopee", StoreManager.experimental_store_names())
 
     def test_lojas_usam_navegador_oculto_por_padrao(self):
 
         store = MercadoLivre()
 
         self.assertTrue(store.browser_manager.headless)
+
+    def test_shopee_extrai_titulo_e_preco_do_card_renderizado(self):
+
+        store = Shopee()
+        lines = store.text_lines(
+            "Fone Bluetooth Sem Fio\nR$\n21,99\nR$\n65,80\n-67%"
+        )
+
+        self.assertEqual(
+            store.extract_title(lines),
+            "Fone Bluetooth Sem Fio"
+        )
+        self.assertEqual(store.extract_price(lines), "21,99")
 
     def test_sanitize_remove_resultados_invalidos(self):
 
