@@ -63,7 +63,7 @@ class Notifier:
         )
 
         return "\n".join([
-            "PromoBot_PRO - Alerta de preco",
+            "Achadinhos da ViVi",
             "",
             f"Termo: {termo}",
             alvo,

@@ -60,6 +60,7 @@ class NotifierTest(unittest.TestCase):
         })
 
         self.assertIn("Termo: promocoes", mensagem)
+        self.assertIn("Achadinhos da ViVi", mensagem)
         self.assertIn("Tipo: promocao encontrada", mensagem)
 
     @patch.dict("os.environ", {
