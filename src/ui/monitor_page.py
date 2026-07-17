@@ -9,14 +9,13 @@ from src.core.store_manager import StoreManager
 
 class MonitorPage(ctk.CTkFrame):
 
-    def __init__(self, master, database):
+    def __init__(self, master, database, runner=None):
         super().__init__(master)
 
         self.database = database
-        self.runner = MonitorRunner(
-            database,
-            progress_callback=self.log_threadsafe
-        )
+        self.runner = runner or MonitorRunner(database)
+        self.previous_progress_callback = self.runner.progress_callback
+        self.runner.set_progress_callback(self.log_threadsafe)
 
         self.criar_interface()
         self.carregar()
@@ -268,3 +267,10 @@ class MonitorPage(ctk.CTkFrame):
             0,
             lambda: self.lista.insert("end", texto + "\n")
         )
+
+    def destroy(self):
+
+        if self.runner.progress_callback == self.log_threadsafe:
+            self.runner.set_progress_callback(self.previous_progress_callback)
+
+        super().destroy()

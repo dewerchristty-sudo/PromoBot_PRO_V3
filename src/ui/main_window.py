@@ -1,5 +1,6 @@
 import customtkinter as ctk
 
+from src.core.monitor import MonitorRunner
 from src.ui.alerts_page import AlertsPage
 from src.ui.dashboard import Dashboard
 from src.ui.history_page import HistoryPage
@@ -16,6 +17,7 @@ class MainWindow(ctk.CTk):
         super().__init__()
 
         self.database = database
+        self.monitor_runner = MonitorRunner(database, self.log_monitor_status)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -25,6 +27,8 @@ class MainWindow(ctk.CTk):
         self.minsize(1100, 650)
 
         self.criar_interface()
+        self.after(1000, self.iniciar_monitor_automatico)
+        self.protocol("WM_DELETE_WINDOW", self.fechar)
 
     # ===============================================
 
@@ -211,7 +215,8 @@ class MainWindow(ctk.CTk):
 
         MonitorPage(
             self.area,
-            self.database
+            self.database,
+            self.monitor_runner
         ).pack(
             fill="both",
             expand=True
@@ -256,3 +261,28 @@ class MainWindow(ctk.CTk):
         self.status.configure(
             text="Configuracoes"
         )
+
+    # ===============================================
+
+    def iniciar_monitor_automatico(self):
+
+        ativos = self.database.listar_monitoramentos(somente_ativos=True)
+
+        if ativos and not self.monitor_runner.running:
+            self.monitor_runner.start()
+            self.status.configure(
+                text=f"Monitor automatico iniciado | {len(ativos)} ativo(s)"
+            )
+
+    # ===============================================
+
+    def log_monitor_status(self, texto):
+
+        self.after(0, lambda: self.status.configure(text=texto))
+
+    # ===============================================
+
+    def fechar(self):
+
+        self.monitor_runner.stop()
+        self.destroy()

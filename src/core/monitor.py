@@ -33,6 +33,10 @@ class MonitorRunner:
         self.running = False
         self.log("Monitoramento parado.")
 
+    def set_progress_callback(self, progress_callback):
+
+        self.progress_callback = progress_callback
+
     def run_once(self):
 
         total = 0
