@@ -1,4 +1,5 @@
 import os
+from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
@@ -72,8 +73,51 @@ class Notifier:
             *price_lines,
             f"Produto: {self.value(item, 'titulo')}",
             "",
-            self.value(item, "link"),
+            *self.link_lines(item),
         ]).strip()
+
+    def link_lines(self, item):
+
+        link = self.affiliate_link(item)
+        lines = [link]
+
+        storefront = os.getenv("SHOPEE_AFFILIATE_STOREFRONT", "").strip()
+
+        if self.is_shopee(item) and storefront and storefront != link:
+            lines.extend([
+                "",
+                "Mais achadinhos da ViVi na Shopee:",
+                storefront,
+            ])
+
+        return lines
+
+    def affiliate_link(self, item):
+
+        link = self.value(item, "link", "") or ""
+
+        if not self.is_shopee(item):
+            return link
+
+        template = os.getenv("SHOPEE_AFFILIATE_TEMPLATE", "").strip()
+
+        if not template:
+            return link
+
+        affiliate_id = os.getenv("SHOPEE_AFFILIATE_ID", "").strip()
+
+        return template.format(
+            url=link,
+            url_encoded=quote(link, safe=""),
+            affiliate_id=affiliate_id,
+        )
+
+    def is_shopee(self, item):
+
+        loja = (self.value(item, "loja", "") or "").strip().lower()
+        link = (self.value(item, "link", "") or "").strip().lower()
+
+        return loja == "shopee" or "shopee.com.br" in link
 
     def format_price_lines(self, item):
 

@@ -69,6 +69,33 @@ class NotifierTest(unittest.TestCase):
         self.assertIn("Voce economiza: R$ 50,00 (33.4%)", mensagem)
 
     @patch.dict("os.environ", {
+        "SHOPEE_AFFILIATE_ID": "18347400316",
+        "SHOPEE_AFFILIATE_TEMPLATE": (
+            "https://converter.example/?url={url_encoded}&id={affiliate_id}"
+        ),
+        "SHOPEE_AFFILIATE_STOREFRONT": (
+            "https://collshp.com/achadinhos18vivi"
+        ),
+    })
+    def test_formata_link_afiliado_shopee(self):
+
+        mensagem = Notifier().format_alert({
+            "termo": "",
+            "preco_alvo": None,
+            "loja": "Shopee",
+            "preco": "21,99",
+            "preco_valor": 21.99,
+            "titulo": "Fone Bluetooth",
+            "link": "https://shopee.com.br/produto-i.1.2",
+        })
+
+        self.assertIn(
+            "https://converter.example/?url=https%3A%2F%2Fshopee.com.br%2Fproduto-i.1.2&id=18347400316",
+            mensagem
+        )
+        self.assertIn("Mais achadinhos da ViVi na Shopee:", mensagem)
+
+    @patch.dict("os.environ", {
         "TELEGRAM_BOT_TOKEN": "token",
         "TELEGRAM_CHAT_ID": "123",
         "WHATSAPP_PROVIDER": "",
