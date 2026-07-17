@@ -456,6 +456,11 @@ class Database:
                 p.titulo,
                 p.preco,
                 p.preco_valor,
+                (
+                    SELECT MAX(h.preco_valor)
+                    FROM historico_precos h
+                    WHERE h.produto_id = p.id
+                ) AS maior_preco,
                 p.link,
                 p.imagem
 
@@ -504,6 +509,11 @@ class Database:
                 p.titulo,
                 p.preco,
                 p.preco_valor,
+                (
+                    SELECT MAX(h.preco_valor)
+                    FROM historico_precos h
+                    WHERE h.produto_id = p.id
+                ) AS maior_preco,
                 p.link,
                 p.imagem
 

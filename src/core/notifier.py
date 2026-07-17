@@ -56,6 +56,7 @@ class Notifier:
 
         termo = self.value(item, "termo") or "promocoes"
         preco_alvo = self.value(item, "preco_alvo")
+        price_lines = self.format_price_lines(item)
         alvo = (
             f"Alvo: R$ {preco_alvo:.2f}"
             if preco_alvo is not None
@@ -68,11 +69,37 @@ class Notifier:
             f"Termo: {termo}",
             alvo,
             f"Loja: {self.value(item, 'loja')}",
-            f"Preco: R$ {self.value(item, 'preco')}",
+            *price_lines,
             f"Produto: {self.value(item, 'titulo')}",
             "",
             self.value(item, "link"),
         ]).strip()
+
+    def format_price_lines(self, item):
+
+        current_price = self.value(item, "preco_valor")
+        old_price = self.value(item, "maior_preco")
+
+        if current_price is None:
+            return [f"Preco de promocao: R$ {self.value(item, 'preco')}"]
+
+        current_text = self.format_money(current_price)
+
+        if old_price and old_price > current_price:
+            saving = old_price - current_price
+            discount = (saving / old_price) * 100
+
+            return [
+                f"Preco antigo: ~{self.format_money(old_price)}~",
+                f"Preco de promocao: {current_text}",
+                f"Voce economiza: {self.format_money(saving)} ({discount:.1f}%)",
+            ]
+
+        return [f"Preco de promocao: {current_text}"]
+
+    def format_money(self, value):
+
+        return f"R$ {value:.2f}".replace(".", ",")
 
     def send_telegram_alerts(self, alerts):
 

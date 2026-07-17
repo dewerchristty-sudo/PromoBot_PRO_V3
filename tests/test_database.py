@@ -84,6 +84,14 @@ class DatabaseTest(unittest.TestCase):
         self.database.salvar_produto({
             "loja": "Kabum",
             "titulo": "SSD 1TB NVMe",
+            "preco": "500,00",
+            "link": "https://example.com/ssd-alerta",
+            "imagem": "",
+        })
+
+        self.database.salvar_produto({
+            "loja": "Kabum",
+            "titulo": "SSD 1TB NVMe",
             "preco": "399,90",
             "link": "https://example.com/ssd-alerta",
             "imagem": "",
@@ -93,6 +101,7 @@ class DatabaseTest(unittest.TestCase):
 
         self.assertEqual(len(disparos), 1)
         self.assertEqual(disparos[0]["loja"], "Kabum")
+        self.assertEqual(disparos[0]["maior_preco"], 500.0)
 
     def test_alerta_sem_preco_dispara_somente_promocoes(self):
 

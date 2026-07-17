@@ -55,6 +55,8 @@ class NotifierTest(unittest.TestCase):
             "preco_alvo": None,
             "loja": "Amazon",
             "preco": "99,90",
+            "preco_valor": 99.90,
+            "maior_preco": 149.90,
             "titulo": "Oferta Fone Bluetooth",
             "link": "https://example.com/fone",
         })
@@ -62,6 +64,9 @@ class NotifierTest(unittest.TestCase):
         self.assertIn("Termo: promocoes", mensagem)
         self.assertIn("Achadinhos da ViVi", mensagem)
         self.assertIn("Tipo: promocao encontrada", mensagem)
+        self.assertIn("Preco antigo: ~R$ 149,90~", mensagem)
+        self.assertIn("Preco de promocao: R$ 99,90", mensagem)
+        self.assertIn("Voce economiza: R$ 50,00 (33.4%)", mensagem)
 
     @patch.dict("os.environ", {
         "TELEGRAM_BOT_TOKEN": "token",
