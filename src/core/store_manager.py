@@ -14,12 +14,12 @@ class StoreManager:
 
     STABLE_STORES = [
         "Mercado Livre",
-        "Amazon",
-        "Kabum",
         "Shopee",
     ]
 
     EXPERIMENTAL_STORES = [
+        "Amazon",
+        "Kabum",
         "Terabyte",
         "Americanas",
         "Pichau",

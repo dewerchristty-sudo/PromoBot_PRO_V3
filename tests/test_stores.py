@@ -23,9 +23,9 @@ class StoresTest(unittest.TestCase):
     def test_lojas_estaveis_e_experimentais(self):
 
         self.assertIn("Mercado Livre", StoreManager.stable_store_names())
-        self.assertIn("Amazon", StoreManager.stable_store_names())
-        self.assertIn("Kabum", StoreManager.stable_store_names())
         self.assertIn("Shopee", StoreManager.stable_store_names())
+        self.assertIn("Amazon", StoreManager.experimental_store_names())
+        self.assertIn("Kabum", StoreManager.experimental_store_names())
         self.assertIn("Americanas", StoreManager.experimental_store_names())
         self.assertIn("Terabyte", StoreManager.experimental_store_names())
 
