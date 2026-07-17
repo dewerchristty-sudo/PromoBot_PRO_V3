@@ -608,7 +608,7 @@ class Database:
 
             """)
 
-            return self.cursor.fetchall()
+            return self.filtrar_alertas_pendentes(self.cursor.fetchall())
 
     # ============================================
 
@@ -643,6 +643,52 @@ class Database:
 
     # ============================================
 
+    def filtrar_alertas_pendentes(self, alertas):
+
+        pendentes = []
+        vistos = set()
+
+        for alerta in alertas:
+            assinatura = self.assinatura_notificacao(alerta)
+            chave = (alerta["alerta_id"], assinatura or alerta["link"])
+
+            if chave in vistos:
+                continue
+
+            if self.notificacao_ja_enviada(alerta, assinatura):
+                continue
+
+            vistos.add(chave)
+            pendentes.append(alerta)
+
+        return pendentes
+
+    # ============================================
+
+    def notificacao_ja_enviada(self, alerta, assinatura=None):
+
+        assinatura = assinatura or self.assinatura_notificacao(alerta)
+
+        self.cursor.execute("""
+
+        SELECT 1
+
+        FROM notificacoes_enviadas
+
+        WHERE alerta_id = ?
+            AND (
+                link = ?
+                OR assinatura = ?
+            )
+
+        LIMIT 1
+
+        """, (alerta["alerta_id"], alerta["link"], assinatura))
+
+        return self.cursor.fetchone() is not None
+
+    # ============================================
+
     def assinatura_notificacao(self, alerta):
 
         loja = self.normalizar_assinatura(alerta["loja"])
@@ -657,7 +703,7 @@ class Database:
 
     def normalizar_assinatura(self, texto):
 
-        texto = str(texto or "").lower().strip()
+        texto = Parser.clean_text(str(texto or "")).lower().strip()
         texto = re.sub(r"\s+", " ", texto)
 
         return texto
