@@ -149,6 +149,34 @@ class DatabaseTest(unittest.TestCase):
 
         self.assertEqual(len(self.database.alertas_pendentes()), 0)
 
+    def test_alertas_pendentes_nao_repetem_mesmo_produto_com_link_diferente(self):
+
+        self.database.criar_alerta("", "")
+
+        self.database.salvar_produto({
+            "loja": "Amazon",
+            "titulo": "Oferta imperdivel Fone Bluetooth",
+            "preco": "99,90",
+            "link": "https://example.com/fone-oferta?utm=1",
+            "imagem": "",
+        })
+
+        pendentes = self.database.alertas_pendentes()
+
+        self.assertEqual(len(pendentes), 1)
+
+        self.database.marcar_notificacoes_enviadas(pendentes)
+
+        self.database.salvar_produto({
+            "loja": "Amazon",
+            "titulo": "Oferta imperdivel Fone Bluetooth",
+            "preco": "99,90",
+            "link": "https://example.com/fone-oferta?utm=2",
+            "imagem": "",
+        })
+
+        self.assertEqual(len(self.database.alertas_pendentes()), 0)
+
     def test_cria_e_registra_monitoramento(self):
 
         primeiro_id = self.database.criar_monitoramento(

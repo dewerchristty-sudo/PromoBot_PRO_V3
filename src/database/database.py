@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import sys
 import threading
@@ -135,6 +136,8 @@ class Database:
 
                 link TEXT,
 
+                assinatura TEXT,
+
                 preco_valor REAL DEFAULT 0,
 
                 data TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -165,6 +168,45 @@ class Database:
                 "ALTER TABLE produtos ADD COLUMN promocao INTEGER DEFAULT 0"
             )
 
+        self.cursor.execute("PRAGMA table_info(notificacoes_enviadas)")
+        colunas_notificacoes = {
+            coluna["name"] for coluna in self.cursor.fetchall()
+        }
+
+        if "assinatura" not in colunas_notificacoes:
+            self.cursor.execute(
+                "ALTER TABLE notificacoes_enviadas ADD COLUMN assinatura TEXT"
+            )
+
+        self.cursor.execute("""
+
+        UPDATE notificacoes_enviadas
+
+        SET assinatura = (
+            SELECT lower(trim(p.loja)) || '|' || lower(trim(p.titulo))
+            FROM produtos p
+            WHERE p.link = notificacoes_enviadas.link
+            LIMIT 1
+        )
+
+        WHERE assinatura IS NULL
+
+        """)
+
+        self.cursor.execute("""
+
+        DELETE FROM notificacoes_enviadas
+
+        WHERE assinatura IS NOT NULL
+        AND id NOT IN (
+            SELECT MIN(id)
+            FROM notificacoes_enviadas
+            WHERE assinatura IS NOT NULL
+            GROUP BY alerta_id, assinatura
+        )
+
+        """)
+
         self.cursor.execute("""
 
         DELETE FROM produtos
@@ -190,6 +232,16 @@ class Database:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_produtos_link_unique
 
         ON produtos(link)
+
+        """)
+
+        self.cursor.execute("""
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_notificacoes_assinatura_unique
+
+        ON notificacoes_enviadas(alerta_id, assinatura)
+
+        WHERE assinatura IS NOT NULL
 
         """)
 
@@ -456,6 +508,7 @@ class Database:
                 p.titulo,
                 p.preco,
                 p.preco_valor,
+                lower(trim(p.loja)) || '|' || lower(trim(p.titulo)) AS assinatura,
                 (
                     SELECT MAX(h.preco_valor)
                     FROM historico_precos h
@@ -509,6 +562,7 @@ class Database:
                 p.titulo,
                 p.preco,
                 p.preco_valor,
+                lower(trim(p.loja)) || '|' || lower(trim(p.titulo)) AS assinatura,
                 (
                     SELECT MAX(h.preco_valor)
                     FROM historico_precos h
@@ -538,10 +592,15 @@ class Database:
 
             LEFT JOIN notificacoes_enviadas n
                 ON n.alerta_id = a.id
-                AND n.link = p.link
+                AND (
+                    n.link = p.link
+                    OR n.assinatura = lower(trim(p.loja)) || '|' || lower(trim(p.titulo))
+                )
 
             WHERE a.ativo = 1
                 AND n.id IS NULL
+
+            GROUP BY a.id, lower(trim(p.loja)), lower(trim(p.titulo))
 
             ORDER BY
                 p.preco_valor ASC,
@@ -562,8 +621,9 @@ class Database:
                 alerta_id = alerta["alerta_id"]
                 link = alerta["link"]
                 preco_valor = alerta["preco_valor"]
+                assinatura = self.assinatura_notificacao(alerta)
 
-                if not alerta_id or not link:
+                if not alerta_id or (not link and not assinatura):
                     continue
 
                 self.cursor.execute("""
@@ -571,14 +631,36 @@ class Database:
                 INSERT OR IGNORE INTO notificacoes_enviadas(
                     alerta_id,
                     link,
+                    assinatura,
                     preco_valor
                 )
 
-                VALUES(?,?,?)
+                VALUES(?,?,?,?)
 
-                """, (alerta_id, link, preco_valor))
+                """, (alerta_id, link, assinatura, preco_valor))
 
             self.conn.commit()
+
+    # ============================================
+
+    def assinatura_notificacao(self, alerta):
+
+        loja = self.normalizar_assinatura(alerta["loja"])
+        titulo = self.normalizar_assinatura(alerta["titulo"])
+
+        if not loja and not titulo:
+            return ""
+
+        return f"{loja}|{titulo}"
+
+    # ============================================
+
+    def normalizar_assinatura(self, texto):
+
+        texto = str(texto or "").lower().strip()
+        texto = re.sub(r"\s+", " ", texto)
+
+        return texto
 
     # ============================================
 
