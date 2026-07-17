@@ -3,11 +3,49 @@ import re
 
 class Parser:
 
+    MOJIBAKE_MARKERS = (
+        "Ã",
+        "Â",
+        "â€",
+        "â€“",
+        "â€”",
+        "â„¢",
+    )
+
+    @staticmethod
+    def fix_encoding(text):
+
+        if not text:
+            return ""
+
+        fixed = text
+
+        for _ in range(2):
+
+            if not any(marker in fixed for marker in Parser.MOJIBAKE_MARKERS):
+                break
+
+            try:
+                candidate = fixed.encode("cp1252").decode("utf-8")
+            except UnicodeError:
+                break
+
+            if candidate == fixed:
+                break
+
+            fixed = candidate
+
+        return fixed
+
+    # ==========================================
+
     @staticmethod
     def clean_text(text):
 
         if not text:
             return ""
+
+        text = Parser.fix_encoding(str(text))
 
         text = text.replace("\n", " ")
         text = text.replace("\t", " ")
