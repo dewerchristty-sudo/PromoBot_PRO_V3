@@ -27,7 +27,7 @@ class AlertsPage(ctk.CTkFrame):
 
         ctk.CTkLabel(
             self,
-            text="Cadastre um termo e o preco maximo para acompanhar ofertas.",
+            text="Use preco em branco para receber somente promocoes encontradas nas lojas.",
             font=("Arial", 14)
         ).pack(pady=(0, 18))
 
@@ -37,14 +37,14 @@ class AlertsPage(ctk.CTkFrame):
 
         self.termo = ctk.CTkEntry(
             form,
-            placeholder_text="Produto ou palavra-chave...",
+            placeholder_text="Produto ou palavra-chave (opcional)...",
             height=38
         )
         self.termo.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
 
         self.preco = ctk.CTkEntry(
             form,
-            placeholder_text="Preco alvo",
+            placeholder_text="Preco alvo ou vazio",
             width=120,
             height=38
         )
@@ -117,7 +117,7 @@ class AlertsPage(ctk.CTkFrame):
 
             messagebox.showerror(
                 "Alerta invalido",
-                "Informe um preco valido. Exemplo: 399,90"
+                "Informe um preco valido ou deixe em branco para promocoes."
             )
             return
 
@@ -143,23 +143,34 @@ class AlertsPage(ctk.CTkFrame):
 
         for alerta in self.alertas:
             status = "ativo" if alerta["ativo"] else "pausado"
+            termo = alerta["termo"] or "todas as promocoes"
+            alvo = (
+                f"ate R$ {alerta['preco_alvo']:.2f}"
+                if alerta["preco_alvo"] is not None
+                else "somente promocoes"
+            )
             self.lista.insert(
                 "end",
-                f"ID {alerta['id']} | {status} | {alerta['termo']} "
-                f"ate R$ {alerta['preco_alvo']:.2f}\n"
+                f"ID {alerta['id']} | {status} | {termo} | {alvo}\n"
             )
 
         self.lista.insert("end", "\nProdutos que bateram alerta\n")
         self.lista.insert("end", "==============================\n\n")
 
         if not disparos:
-            self.lista.insert("end", "Nenhum produto abaixo do preco alvo ainda.\n")
+            self.lista.insert("end", "Nenhum produto bateu alerta ainda.\n")
             return
 
         for item in disparos:
+            termo = item["termo"] or "promocoes"
+            alvo = (
+                f"alvo R$ {item['preco_alvo']:.2f}"
+                if item["preco_alvo"] is not None
+                else "promocao"
+            )
             self.lista.insert(
                 "end",
-                f"[{item['termo']}] alvo R$ {item['preco_alvo']:.2f}\n"
+                f"[{termo}] {alvo}\n"
                 f"{item['loja']} | R$ {item['preco']} | {item['titulo']}\n"
                 f"{item['link']}\n"
                 "------------------------------------------------------------\n"

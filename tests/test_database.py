@@ -94,6 +94,32 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(len(disparos), 1)
         self.assertEqual(disparos[0]["loja"], "Kabum")
 
+    def test_alerta_sem_preco_dispara_somente_promocoes(self):
+
+        self.database.criar_alerta("", "")
+
+        self.database.salvar_produto({
+            "loja": "Amazon",
+            "titulo": "Oferta imperdivel Fone Bluetooth",
+            "preco": "99,90",
+            "link": "https://example.com/fone-oferta",
+            "imagem": "",
+        })
+
+        self.database.salvar_produto({
+            "loja": "Amazon",
+            "titulo": "Fone Bluetooth preco normal",
+            "preco": "199,90",
+            "link": "https://example.com/fone-normal",
+            "imagem": "",
+        })
+
+        disparos = self.database.alertas_disparados()
+
+        self.assertEqual(len(disparos), 1)
+        self.assertEqual(disparos[0]["titulo"], "Oferta imperdivel Fone Bluetooth")
+        self.assertIsNone(disparos[0]["preco_alvo"])
+
     def test_cria_e_registra_monitoramento(self):
 
         primeiro_id = self.database.criar_monitoramento(

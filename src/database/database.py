@@ -344,9 +344,14 @@ class Database:
     def criar_alerta(self, termo, preco_alvo):
 
         termo = termo.strip()
-        preco_alvo = float(str(preco_alvo).replace(",", "."))
+        preco_texto = str(preco_alvo or "").strip()
+        preco_alvo = (
+            float(preco_texto.replace(",", "."))
+            if preco_texto
+            else None
+        )
 
-        if not termo or preco_alvo <= 0:
+        if preco_alvo is not None and preco_alvo <= 0:
             return
 
         with self.lock:
@@ -439,9 +444,21 @@ class Database:
             FROM alertas a
 
             JOIN produtos p
-                ON p.titulo LIKE '%' || a.termo || '%'
+                ON (
+                    a.termo = ''
+                    OR p.titulo LIKE '%' || a.termo || '%'
+                )
                 AND p.preco_valor > 0
-                AND p.preco_valor <= a.preco_alvo
+                AND (
+                    (
+                        a.preco_alvo IS NOT NULL
+                        AND p.preco_valor <= a.preco_alvo
+                    )
+                    OR (
+                        a.preco_alvo IS NULL
+                        AND p.promocao = 1
+                    )
+                )
 
             WHERE a.ativo = 1
 

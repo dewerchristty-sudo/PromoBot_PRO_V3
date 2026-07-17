@@ -46,6 +46,22 @@ class NotifierTest(unittest.TestCase):
 
         self.assertIn("WhatsApp", resultado)
 
+    def test_formata_alerta_sem_preco_alvo(self):
+
+        notifier = Notifier()
+
+        mensagem = notifier.format_alert({
+            "termo": "",
+            "preco_alvo": None,
+            "loja": "Amazon",
+            "preco": "99,90",
+            "titulo": "Oferta Fone Bluetooth",
+            "link": "https://example.com/fone",
+        })
+
+        self.assertIn("Termo: promocoes", mensagem)
+        self.assertIn("Tipo: promocao encontrada", mensagem)
+
     @patch.dict("os.environ", {
         "TELEGRAM_BOT_TOKEN": "token",
         "TELEGRAM_CHAT_ID": "123",

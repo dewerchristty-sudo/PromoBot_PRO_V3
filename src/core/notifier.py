@@ -52,11 +52,19 @@ class Notifier:
 
     def format_alert(self, item):
 
+        termo = self.value(item, "termo") or "promocoes"
+        preco_alvo = self.value(item, "preco_alvo")
+        alvo = (
+            f"Alvo: R$ {preco_alvo:.2f}"
+            if preco_alvo is not None
+            else "Tipo: promocao encontrada"
+        )
+
         return "\n".join([
             "PromoBot_PRO - Alerta de preco",
             "",
-            f"Termo: {self.value(item, 'termo')}",
-            f"Alvo: R$ {self.value(item, 'preco_alvo'):.2f}",
+            f"Termo: {termo}",
+            alvo,
             f"Loja: {self.value(item, 'loja')}",
             f"Preco: R$ {self.value(item, 'preco')}",
             f"Produto: {self.value(item, 'titulo')}",
