@@ -290,22 +290,46 @@ class Database:
 
     def detectar_promocao(self, produto, preco_valor):
 
-        titulo = produto.get("titulo", "").lower()
+        titulo = Parser.clean_text(produto.get("titulo", "")).lower()
 
         palavras = (
             "promo",
             "oferta",
             "desconto",
             "liquidacao",
+            "liquidação",
             "cupom",
             "black",
             "imperdivel",
+            "imperdível",
+            "menor preço",
+            "preço baixo",
+            "queima",
+            "saldão",
         )
 
         if any(palavra in titulo for palavra in palavras):
             return True
 
-        return preco_valor > 0
+        if preco_valor <= 0:
+            return False
+
+        link = produto.get("link", "")
+
+        self.cursor.execute("""
+
+        SELECT MAX(preco_valor)
+
+        FROM historico_precos
+
+        WHERE link = ?
+            AND preco_valor > 0
+
+        """, (link,))
+
+        maior_preco = self.cursor.fetchone()[0] or 0
+
+        return maior_preco > 0 and preco_valor <= maior_preco * 0.9
 
     # ============================================
 
@@ -501,6 +525,37 @@ class Database:
             "console ps5",
             "xbox",
         ]
+
+        termos.extend([
+            "promoção",
+            "liquidação",
+            "cupom",
+            "black friday",
+            "achadinhos",
+            "xiaomi",
+            "caixa de som bluetooth",
+            "memoria ram",
+            "processador",
+            "placa mae",
+            "mouse gamer",
+            "teclado mecanico",
+            "nintendo switch",
+            "alexa",
+            "echo dot",
+            "kindle",
+            "smartwatch",
+            "aspirador robo",
+            "cafeteira",
+            "panela eletrica",
+            "ar condicionado",
+            "ventilador",
+            "camera seguranca",
+            "roteador wifi",
+            "impressora",
+            "mochila",
+            "tenis",
+            "perfume",
+        ])
 
         criados = 0
 
