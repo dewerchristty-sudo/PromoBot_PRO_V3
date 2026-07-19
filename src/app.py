@@ -4,7 +4,7 @@ from src.ui.main_window import MainWindow
 
 class PromoBot:
 
-    def __init__(self):
+    def __init__(self) -> None:
 
         self.database = Database()
 
@@ -14,14 +14,17 @@ class PromoBot:
 
     # =========================================
 
-    def integrar(self):
+    def integrar(self) -> None:
 
         self.app.database = self.database
 
     # =========================================
 
-    def run(self):
+    def run(self) -> None:
 
-        self.app.mainloop()
-
-        self.database.fechar()
+        try:
+            self.app.mainloop()
+        finally:
+            self.app.monitor_runner.shutdown()
+            self.app.wait_for_background_workers()
+            self.database.fechar()

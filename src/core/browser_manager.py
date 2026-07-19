@@ -1,17 +1,26 @@
-from playwright.sync_api import sync_playwright
+from typing import Any, Optional
+from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+
+from src.constants import (
+    BROWSER_VIEWPORT_WIDTH,
+    BROWSER_VIEWPORT_HEIGHT,
+    BROWSER_TIMEZONE,
+    BROWSER_LOCALE,
+    BROWSER_USER_AGENT,
+)
 
 
 class BrowserManager:
 
-    def __init__(self, headless=True):
+    def __init__(self, headless: bool = True) -> None:
 
         self.headless = headless
 
-        self.playwright = None
-        self.browser = None
-        self.context = None
+        self.playwright: Optional[Any] = None
+        self.browser: Optional[Browser] = None
+        self.context: Optional[BrowserContext] = None
 
-    def start(self):
+    def start(self) -> BrowserContext:
 
         if self.context is not None:
             return self.context
@@ -41,19 +50,15 @@ class BrowserManager:
             self.context = self.browser.new_context(
 
                 viewport={
-                    "width": 1366,
-                    "height": 768
+                    "width": BROWSER_VIEWPORT_WIDTH,
+                    "height": BROWSER_VIEWPORT_HEIGHT
                 },
 
-                locale="pt-BR",
+                locale=BROWSER_LOCALE,
 
-                timezone_id="America/Sao_Paulo",
+                timezone_id=BROWSER_TIMEZONE,
 
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/138.0.0.0 Safari/537.36"
-                ),
+                user_agent=BROWSER_USER_AGENT,
 
                 java_script_enabled=True,
 
@@ -68,7 +73,7 @@ class BrowserManager:
 
         return self.context
 
-    def new_page(self, stealth=True):
+    def new_page(self, stealth: bool = True) -> Page:
 
         context = self.start()
 
@@ -97,7 +102,7 @@ Object.defineProperty(navigator, 'languages', {
 
         return page
 
-    def close(self):
+    def close(self) -> None:
 
         if self.context:
             self.context.close()

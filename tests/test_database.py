@@ -34,6 +34,138 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(self.database.total_produtos(), 1)
         self.assertEqual(self.database.total_coletas_preco(), 2)
 
+    def test_cria_backup_diario_do_banco(self):
+
+        backups = list((Path(self.temp_dir.name) / "backups").glob("promobot_*.db"))
+
+        self.assertEqual(len(backups), 1)
+
+    def test_salva_e_recupera_link_afiliado(self):
+
+        original = "https://www.mercadolivre.com.br/produto/p/MLB65442354"
+        affiliate = "https://meli.la/17hf8gS"
+
+        self.database.salvar_link_afiliado(
+            "Mercado Livre",
+            original,
+            affiliate,
+        )
+
+        self.assertEqual(
+            self.database.buscar_link_afiliado(original),
+            affiliate,
+        )
+        self.assertEqual(self.database.total_links_afiliados(), 1)
+        self.assertEqual(
+            self.database.etiqueta_link_afiliado(original),
+            "promobotwhatsapp",
+        )
+
+    def test_lista_marketplace_somente_com_ofertas(self):
+
+        self.database.salvar_produto({
+            "loja": "Mercado Livre",
+            "titulo": "Produto comum",
+            "preco": "100,00",
+            "link": "https://mercadolivre.com/produto-comum",
+            "imagem": "https://example.com/comum.jpg",
+        })
+        self.database.salvar_produto({
+            "loja": "Mercado Livre",
+            "titulo": "Oferta especial com desconto",
+            "preco": "80,00",
+            "link": "https://mercadolivre.com/produto-oferta",
+            "imagem": "https://example.com/oferta.jpg",
+        })
+
+        offers = self.database.listar_produtos_marketplace(
+            somente_promocoes=True
+        )
+
+        self.assertEqual(len(offers), 1)
+        self.assertEqual(offers[0]["titulo"], "Oferta especial com desconto")
+
+    def test_registra_historico_de_envio(self):
+
+        self.database.registrar_envio(
+            "Mercado Livre",
+            "Produto afiliado",
+            "https://mercadolivre.com.br/p/MLB1",
+            "https://meli.la/teste",
+            "promobotwhatsapp",
+            "WhatsApp",
+            "120000@g.us",
+        )
+
+        history = self.database.listar_historico_envios()
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["etiqueta"], "promobotwhatsapp")
+        self.assertEqual(history[0]["status"], "enviado")
+        self.assertEqual(
+            self.database.contar_envios_recentes(60, "WhatsApp"),
+            1,
+        )
+
+    def test_notificacao_manual_nao_repete_produto(self):
+
+        link = "https://www.mercadolivre.com.br/produto/p/MLB65442354"
+
+        self.assertFalse(self.database.produto_ja_notificado(link))
+
+        self.database.marcar_notificacao_manual(link)
+        self.database.marcar_notificacao_manual(link)
+
+        self.assertTrue(self.database.produto_ja_notificado(link))
+
+    def test_bloqueia_titulo_muito_semelhante_ja_enviado(self):
+
+        self.database.registrar_envio(
+            "Mercado Livre", "Smartphone Galaxy A55 256GB Preto",
+            "https://example.com/a", "https://meli.la/a", "promobotwhatsapp",
+            "WhatsApp", "tech@g.us",
+        )
+        self.assertTrue(self.database.produto_ja_notificado(
+            "https://example.com/b", "Mercado Livre",
+            "Smartphone Galaxy A55 256 GB Azul",
+        ))
+
+    def test_registra_metricas_e_limite_por_destino(self):
+
+        self.database.registrar_envio(
+            "Shopee", "Perfume", "original", "afiliado", "etiqueta",
+            "WhatsApp", "beleza@g.us",
+        )
+        self.database.registrar_metricas_grupo("beleza@g.us", 10, 2, 15.5)
+        self.assertEqual(
+            self.database.contar_envios_destino_recentes("beleza@g.us"), 1
+        )
+        report = self.database.relatorio_metricas_grupos()
+        self.assertEqual(report["beleza@g.us"]["vendas"], 2)
+
+    def test_fila_de_notificacoes_sobrevive_e_pode_ser_recuperada(self):
+
+        alert = {
+            "link": "https://example.com/oferta",
+            "loja": "Shopee",
+            "titulo": "Oferta com falha temporária",
+            "preco_valor": 20.0,
+        }
+        self.database.enfileirar_notificacoes([alert], "sem conexão")
+        queued = self.database.listar_fila_notificacoes()
+        self.assertEqual(self.database.total_fila_notificacoes(), 1)
+        self.assertEqual(queued[0][1]["titulo"], alert["titulo"])
+        self.database.remover_fila_notificacoes([queued[0][0]["id"]])
+        self.assertEqual(self.database.total_fila_notificacoes(), 0)
+
+    def test_registra_eventos_do_supervisor(self):
+
+        self.database.registrar_evento_sistema(
+            "alerta", "whatsapp", "desconectado"
+        )
+        events = self.database.listar_eventos_sistema()
+        self.assertEqual(events[0]["componente"], "whatsapp")
+
     def test_busca_produtos_por_titulo(self):
 
         self.database.salvar_produto({
@@ -147,6 +279,24 @@ class DatabaseTest(unittest.TestCase):
 
         self.database.marcar_notificacoes_enviadas(pendentes)
 
+        self.assertEqual(len(self.database.alertas_pendentes()), 0)
+
+    def test_mesmo_produto_nao_repete_em_alertas_diferentes(self):
+
+        self.database.criar_alerta("Fone", "150,00")
+        self.database.criar_alerta("Bluetooth", "150,00")
+        self.database.salvar_produto({
+            "loja": "Mercado Livre",
+            "titulo": "Fone Bluetooth em oferta",
+            "preco": "99,90",
+            "link": "https://example.com/fone-unico",
+            "imagem": "https://example.com/fone.jpg",
+        })
+
+        pendentes = self.database.alertas_pendentes()
+
+        self.assertEqual(len(pendentes), 1)
+        self.database.marcar_notificacoes_enviadas(pendentes)
         self.assertEqual(len(self.database.alertas_pendentes()), 0)
 
     def test_alertas_pendentes_nao_repetem_mesmo_produto_com_link_diferente(self):

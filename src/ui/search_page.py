@@ -1,5 +1,6 @@
 import threading
 import tkinter as tk
+from queue import Empty, Queue
 
 import customtkinter as ctk
 
@@ -13,6 +14,9 @@ class SearchPage(ctk.CTkFrame):
         super().__init__(master)
 
         self.database = database
+        self.worker = None
+        self.window = self.winfo_toplevel()
+        self.ui_queue = Queue()
 
         self.lojas = {}
 
@@ -23,6 +27,7 @@ class SearchPage(ctk.CTkFrame):
             self.lojas[nome] = tk.BooleanVar(value=False)
 
         self.criar_interface()
+        self.after(50, self.process_ui_queue)
 
     def criar_interface(self):
 
@@ -95,7 +100,22 @@ class SearchPage(ctk.CTkFrame):
 
     def log_threadsafe(self, texto):
 
-        self.after(0, lambda: self.escrever(texto))
+        self.dispatch_ui(lambda: self.escrever(texto))
+
+    def dispatch_ui(self, callback):
+
+        self.ui_queue.put(callback)
+
+    def process_ui_queue(self):
+
+        try:
+            while True:
+                self.ui_queue.get_nowait()()
+        except Empty:
+            pass
+
+        if self.winfo_exists():
+            self.after(50, self.process_ui_queue)
 
     # =======================================
 
@@ -135,11 +155,15 @@ class SearchPage(ctk.CTkFrame):
             self.status.configure(text="Nenhuma loja selecionada.")
             return
 
-        threading.Thread(
+        self.worker = threading.Thread(
             target=self.pesquisar,
             args=(produto, lojas_selecionadas),
             daemon=True
-        ).start()
+        )
+        register = getattr(self.window, "register_background_worker", None)
+        if register:
+            register(self.worker)
+        self.worker.start()
 
     # =======================================
 
@@ -155,27 +179,31 @@ class SearchPage(ctk.CTkFrame):
             resultados = store_manager.search_all(produto)
             self.database.salvar_lista(resultados)
 
-            self.after(
-                0,
-                lambda: self.mostrar_resultados(resultados)
-            )
+            self.dispatch_ui(lambda: self.mostrar_resultados(resultados))
 
         except Exception as erro:
 
-            self.after(
-                0,
-                lambda: self.escrever(f"Erro na busca: {erro}")
+            mensagem = f"Erro na busca: {erro}"
+            self.dispatch_ui(
+                lambda mensagem=mensagem: self.mostrar_erro(mensagem)
             )
 
         finally:
 
-            self.after(
-                0,
+            unregister = getattr(self.window, "unregister_background_worker", None)
+            if unregister:
+                unregister(threading.current_thread())
+            self.dispatch_ui(
                 lambda: self.botao.configure(
                     state="normal",
                     text="Pesquisar"
                 )
             )
+
+    def mostrar_erro(self, mensagem):
+
+        self.status.configure(text="A busca falhou.")
+        self.escrever(mensagem)
 
     # =======================================
 

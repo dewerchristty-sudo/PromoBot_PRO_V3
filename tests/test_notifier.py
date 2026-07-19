@@ -7,6 +7,33 @@ from src.core.notifier import Notifier
 
 class NotifierTest(unittest.TestCase):
 
+    def setUp(self):
+
+        self.notification_stores_patch = patch.dict(
+            "os.environ",
+            {
+                "NOTIFICATION_DISABLED_STORES": "",
+                "MAX_OFFER_AGE_HOURS": "0",
+                "MIN_DISCOUNT_PERCENT": "0",
+                "MAX_NOTIFICATIONS_PER_HOUR": "0",
+                "NOTIFICATION_START_HOUR": "0",
+                "NOTIFICATION_END_HOUR": "24",
+                "MIN_NOTIFICATION_INTERVAL_SECONDS": "0",
+                "MAX_NOTIFICATION_INTERVAL_SECONDS": "0",
+                "WHATSAPP_GROUP_MAMAE_BEBE": "",
+                "WHATSAPP_GROUP_CASA_ENXOVAL": "",
+                "WHATSAPP_GROUP_ELETRODOMESTICOS": "",
+                "WHATSAPP_GROUP_SMARTPHONES_TECNOLOGIA": "",
+                "WHATSAPP_GROUP_BELEZA_PERFUMARIA": "",
+                "WHATSAPP_GROUP_LIMPEZA_UTILIDADES": "",
+            },
+        )
+        self.notification_stores_patch.start()
+
+    def tearDown(self):
+
+        self.notification_stores_patch.stop()
+
     def test_sem_alertas_nao_envia(self):
 
         notifier = Notifier()
@@ -14,6 +41,37 @@ class NotifierTest(unittest.TestCase):
         self.assertEqual(
             notifier.send_alerts([]),
             "Nenhum alerta disparado."
+        )
+
+    @patch.dict("os.environ", {
+        "WHATSAPP_GROUP_MAMAE_BEBE": "mamae@g.us",
+        "WHATSAPP_GROUP_CASA_ENXOVAL": "casa@g.us",
+        "WHATSAPP_GROUP_ELETRODOMESTICOS": "eletro@g.us",
+        "WHATSAPP_GROUP_SMARTPHONES_TECNOLOGIA": "tech@g.us",
+        "WHATSAPP_GROUP_BELEZA_PERFUMARIA": "beleza@g.us",
+        "WHATSAPP_GROUP_LIMPEZA_UTILIDADES": "limpeza@g.us",
+    }, clear=False)
+    def test_separa_produtos_por_grupo_de_whatsapp(self):
+
+        notifier = Notifier()
+        examples = {
+            "Fralda infantil para bebê": "mamae@g.us",
+            "Jogo de cama casal": "casa@g.us",
+            "Air fryer digital": "eletro@g.us",
+            "Smartphone Galaxy 5G": "tech@g.us",
+            "Perfume feminino": "beleza@g.us",
+            "Aspirador para limpeza": "limpeza@g.us",
+        }
+
+        for title, expected_group in examples.items():
+            self.assertEqual(
+                notifier.whatsapp_recipients_for_alert({"titulo": title}),
+                [expected_group],
+            )
+
+        self.assertEqual(
+            notifier.whatsapp_recipients_for_alert({"titulo": "Produto diverso"}),
+            [],
         )
 
     @patch.dict("os.environ", {
@@ -61,12 +119,26 @@ class NotifierTest(unittest.TestCase):
             "link": "https://example.com/fone",
         })
 
-        self.assertIn("Termo: promocoes", mensagem)
-        self.assertIn("Achadinhos da ViVi", mensagem)
-        self.assertIn("Tipo: promocao encontrada", mensagem)
-        self.assertIn("Preco antigo: ~R$ 149,90~", mensagem)
-        self.assertIn("Preco de promocao: R$ 99,90", mensagem)
-        self.assertIn("Voce economiza: R$ 50,00 (33.4%)", mensagem)
+        self.assertIn(mensagem.splitlines()[0], notifier.ALERT_HEADLINES)
+        self.assertIn("\U0001f4f1 Produto:\nOferta Fone Bluetooth", mensagem)
+        self.assertIn("\U0001f3ea Loja:\nAmazon", mensagem)
+        self.assertIn("\u274c Pre\u00e7o anterior:\nDe: R$ 149,90", mensagem)
+        self.assertIn("\u2705 Pre\u00e7o promocional:\nPor: R$ 99,90", mensagem)
+        self.assertIn(
+            "\U0001f4b0 Voc\u00ea economiza:\nR$ 50,00 \u2014 desconto de 33,4%",
+            mensagem,
+        )
+        self.assertIn("\U0001f6d2 Compre aqui:\nhttps://example.com/fone", mensagem)
+
+    def test_nao_repete_cabecalho_em_notificacoes_consecutivas(self):
+
+        notifier = Notifier()
+        headlines = [notifier.random_headline() for _ in range(30)]
+
+        self.assertEqual(len(set(headlines[:10])), 10)
+
+        for previous, current in zip(headlines, headlines[1:]):
+            self.assertNotEqual(previous, current)
 
     @patch.dict("os.environ", {
         "SHOPEE_AFFILIATE_ID": "18347400316",
@@ -188,6 +260,35 @@ class NotifierTest(unittest.TestCase):
 
         self.assertEqual(resultado, "Enviado por: Telegram")
         self.assertIn("sendPhoto", post.call_args.args[0])
+
+    @patch.dict("os.environ", {
+        "TELEGRAM_BOT_TOKEN": "token",
+        "TELEGRAM_CHAT_ID": "123",
+        "WHATSAPP_GROUP_MAMAE_BEBE": "grupo-mamae",
+        "WHATSAPP_PROVIDER": "",
+        "EVOLUTION_API_URL": "",
+        "EVOLUTION_INSTANCE": "",
+        "EVOLUTION_API_KEY": "",
+        "WHATSAPP_WEBHOOK_URL": "",
+    })
+    @patch("src.core.notifier.requests.post")
+    def test_categoria_whatsapp_nao_bloqueia_telegram(self, post):
+
+        response = Mock()
+        response.raise_for_status.return_value = None
+        post.return_value = response
+        notifier = Notifier()
+
+        resultado = notifier.send_alerts([{
+            "loja": "Kabum",
+            "titulo": "Livro de receitas",
+            "preco": "49,90",
+            "link": "https://example.com/livro",
+            "imagem": "https://example.com/livro.jpg",
+        }])
+
+        self.assertTrue(resultado.startswith("Enviado por: Telegram"))
+        self.assertIn("sem categoria segura", resultado)
 
     @patch.dict("os.environ", {
         "TELEGRAM_BOT_TOKEN": "token",
@@ -316,6 +417,7 @@ class NotifierTest(unittest.TestCase):
         "ZAPI_INSTANCE_TOKEN": "instance-token",
         "ZAPI_CLIENT_TOKEN": "client-token",
         "WHATSAPP_PHONES": "5511999999999,5527997463523",
+        "WHATSAPP_GROUPS": "",
         "EVOLUTION_API_URL": "",
         "EVOLUTION_INSTANCE": "",
         "EVOLUTION_API_KEY": "",
@@ -356,6 +458,7 @@ class NotifierTest(unittest.TestCase):
         "EVOLUTION_INSTANCE": "promobot",
         "EVOLUTION_API_KEY": "local-key",
         "WHATSAPP_PHONES": "5511999999999,5527997463523",
+        "WHATSAPP_GROUPS": "",
         "ZAPI_INSTANCE_ID": "",
         "ZAPI_INSTANCE_TOKEN": "",
         "ZAPI_CLIENT_TOKEN": "",
@@ -403,6 +506,167 @@ class NotifierTest(unittest.TestCase):
         "EVOLUTION_API_URL": "http://localhost:8080",
         "EVOLUTION_INSTANCE": "promobot",
         "EVOLUTION_API_KEY": "local-key",
+        "WHATSAPP_GROUPS": "120363408335461860@g.us",
+        "WHATSAPP_PHONES": "",
+        "WHATSAPP_PHONE": "",
+        "ZAPI_INSTANCE_ID": "",
+        "ZAPI_INSTANCE_TOKEN": "",
+        "ZAPI_CLIENT_TOKEN": "",
+    })
+    @patch("src.core.notifier.requests.post")
+    def test_envia_alerta_para_grupo_evolution(self, post):
+
+        response = Mock()
+        response.raise_for_status.return_value = None
+        post.return_value = response
+
+        resultado = Notifier().send_alerts([
+            {
+                "termo": "fone",
+                "preco_alvo": None,
+                "loja": "Loja Teste",
+                "preco": "21,99",
+                "titulo": "Fone Bluetooth",
+                "link": "https://example.com/produto",
+                "imagem": "https://example.com/fone.jpg",
+            }
+        ])
+
+        self.assertEqual(resultado, "Enviado por: WhatsApp")
+        self.assertEqual(
+            post.call_args.kwargs["json"]["number"],
+            "120363408335461860@g.us"
+        )
+
+    def test_bloqueia_marketplace_sem_link_afiliado(self):
+
+        notifier = Notifier()
+        result = notifier.send_alerts([{
+            "loja": "Mercado Livre",
+            "titulo": "Produto sem afiliado",
+            "link": "https://www.mercadolivre.com.br/produto/p/MLB99999999",
+            "imagem": "https://example.com/produto.jpg",
+        }])
+
+        self.assertIn("aguardando link afiliado", result)
+
+    @patch.dict("os.environ", {
+        "NOTIFICATION_DISABLED_STORES": "Amazon",
+    })
+    def test_bloqueia_notificacao_de_loja_desabilitada(self):
+
+        result = Notifier().send_alerts([{
+            "loja": "Amazon",
+            "titulo": "Produto Amazon",
+            "link": "https://amazon.com.br/produto",
+            "imagem": "https://example.com/produto.jpg",
+        }])
+
+        self.assertIn("lojas desabilitadas", result)
+
+    @patch.dict("os.environ", {
+        "MAX_OFFER_AGE_HOURS": "24",
+    })
+    def test_bloqueia_oferta_com_mais_de_24_horas(self):
+
+        result = Notifier().send_alerts([{
+            "loja": "Loja Teste",
+            "titulo": "Oferta antiga",
+            "data": "2020-01-01 00:00:00",
+            "link": "https://amazon.com.br/produto",
+            "imagem": "https://example.com/produto.jpg",
+        }])
+
+        self.assertIn("mais de 24 horas", result)
+
+    @patch.dict("os.environ", {
+        "MIN_DISCOUNT_PERCENT": "10",
+    })
+    def test_bloqueia_oferta_abaixo_do_desconto_minimo(self):
+
+        result = Notifier().send_alerts([{
+            "loja": "Loja Teste",
+            "titulo": "Oferta pequena",
+            "preco_valor": 95.0,
+            "maior_preco": 100.0,
+            "link": "https://amazon.com.br/produto",
+            "imagem": "https://example.com/produto.jpg",
+        }])
+
+        self.assertIn("abaixo do desconto minimo", result)
+
+    @patch.dict("os.environ", {
+        "MAX_NOTIFICATIONS_PER_HOUR": "5",
+    })
+    def test_respeita_limite_de_notificacoes_por_hora(self):
+
+        database = Mock()
+        database.contar_envios_recentes.return_value = 5
+        result = Notifier(database).send_alerts([{
+            "loja": "Loja Teste",
+            "titulo": "Oferta dentro do limite",
+            "link": "https://amazon.com.br/produto",
+            "imagem": "https://example.com/produto.jpg",
+        }])
+
+        self.assertIn("aguardando limite horario", result)
+
+    @patch.dict("os.environ", {
+        "NOTIFICATION_START_HOUR": "23",
+        "NOTIFICATION_END_HOUR": "23",
+    })
+    def test_horarios_iguais_liberam_periodo_integral(self):
+
+        self.assertTrue(Notifier().within_notification_hours())
+
+    def test_prioriza_fila_por_desconto_preco_e_imagem(self):
+
+        items = [
+            {
+                "titulo": "Sem imagem",
+                "preco_valor": 10.0,
+                "maior_preco": 100.0,
+                "imagem": "",
+            },
+            {
+                "titulo": "Desconto menor",
+                "preco_valor": 80.0,
+                "maior_preco": 100.0,
+                "imagem": "https://example.com/a.jpg",
+            },
+            {
+                "titulo": "Desconto maior preco maior",
+                "preco_valor": 70.0,
+                "maior_preco": 100.0,
+                "imagem": "https://example.com/b.jpg",
+            },
+            {
+                "titulo": "Desconto maior preco menor",
+                "preco_valor": 35.0,
+                "maior_preco": 50.0,
+                "imagem": "https://example.com/c.jpg",
+            },
+        ]
+
+        prioritized, without_image = Notifier().prioritize_affiliate_queue(items)
+
+        self.assertEqual(
+            [item["titulo"] for item in prioritized],
+            [
+                "Desconto maior preco menor",
+                "Desconto maior preco maior",
+                "Desconto menor",
+            ],
+        )
+        self.assertEqual(without_image[0]["titulo"], "Sem imagem")
+
+    @patch.dict("os.environ", {
+        "TELEGRAM_BOT_TOKEN": "",
+        "TELEGRAM_CHAT_ID": "",
+        "WHATSAPP_PROVIDER": "evolution",
+        "EVOLUTION_API_URL": "http://localhost:8080",
+        "EVOLUTION_INSTANCE": "promobot",
+        "EVOLUTION_API_KEY": "local-key",
         "WHATSAPP_PHONES": "5511999999999",
         "ZAPI_INSTANCE_ID": "",
         "ZAPI_INSTANCE_TOKEN": "",
@@ -421,7 +685,7 @@ class NotifierTest(unittest.TestCase):
                 "alerta_id": 1,
                 "termo": "",
                 "preco_alvo": None,
-                "loja": "Amazon",
+                "loja": "Loja Teste",
                 "preco": "99,90",
                 "titulo": "Oferta Fone Bluetooth",
                 "link": "https://example.com/fone",
@@ -433,6 +697,34 @@ class NotifierTest(unittest.TestCase):
 
         self.assertEqual(resultado, "Enviado por: WhatsApp")
         database.marcar_notificacoes_enviadas.assert_called_once_with(alerts)
+
+    @patch.dict("os.environ", {
+        "TELEGRAM_BOT_TOKEN": "",
+        "TELEGRAM_CHAT_ID": "",
+        "WHATSAPP_PROVIDER": "evolution",
+        "EVOLUTION_API_URL": "http://localhost:8080",
+        "EVOLUTION_INSTANCE": "promobot",
+        "EVOLUTION_API_KEY": "local-key",
+        "WHATSAPP_PHONES": "5511999999999",
+    })
+    @patch("src.core.notifier.requests.post")
+    def test_envio_continua_confirmado_se_historico_falhar(self, post):
+
+        response = Mock()
+        response.raise_for_status.return_value = None
+        post.return_value = response
+        database = Mock()
+        database.registrar_envio.side_effect = RuntimeError("banco indisponivel")
+
+        result = Notifier(database).send_alerts([{
+            "loja": "Loja Teste",
+            "titulo": "Produto enviado",
+            "link": "https://example.com/produto",
+            "imagem": "https://example.com/produto.jpg",
+        }])
+
+        self.assertTrue(result.startswith("Enviado por: WhatsApp"))
+        self.assertIn("falha ao registrar historico", result)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+from typing import Callable, Optional, Any
+
 from src.stores import Americanas
 from src.stores import Amazon
 from src.stores import CasasBahia
@@ -27,7 +29,11 @@ class StoreManager:
         "Casas Bahia",
     ]
 
-    def __init__(self, progress_callback=None, enabled_stores=None):
+    def __init__(
+        self,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        enabled_stores: Optional[list[str]] = None
+    ) -> None:
 
         self.progress_callback = progress_callback
         self.enabled_stores = enabled_stores
@@ -54,7 +60,7 @@ class StoreManager:
 
         ]
 
-        if self.enabled_stores:
+        if self.enabled_stores is not None:
             self.stores = [
                 store for store in self.stores
                 if store.name in self.enabled_stores
@@ -62,7 +68,7 @@ class StoreManager:
 
     # ==========================================
 
-    def log(self, message):
+    def log(self, message: str) -> None:
 
         print(message)
 
@@ -72,7 +78,7 @@ class StoreManager:
 
     # ==========================================
 
-    def search_all(self, product):
+    def search_all(self, product: str) -> list[dict[str, Any]]:
 
         resultados = []
 
@@ -99,7 +105,7 @@ class StoreManager:
 
             except Exception as e:
 
-                self.log(f"[ERRO] {store.name}: {e}")
+                self.log(f"[ERRO] {store.name}: {str(e)}")
 
         self.log("\n" + "=" * 60)
         self.log(
@@ -111,10 +117,10 @@ class StoreManager:
 
     # ==========================================
 
-    def sanitize_results(self, produtos):
+    def sanitize_results(self, produtos: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
 
         limpos = []
-        vistos = set()
+        vistos: set[str] = set()
 
         for produto in produtos or []:
 
@@ -129,6 +135,8 @@ class StoreManager:
             if not link.startswith("http"):
                 continue
 
+            link = Parser.remove_tracking(link)
+
             if link in vistos:
                 continue
 
@@ -138,7 +146,7 @@ class StoreManager:
                 "loja": loja,
                 "titulo": Parser.clean_text(titulo),
                 "preco": Parser.clean_price(preco),
-                "link": Parser.remove_tracking(link),
+                "link": link,
                 "imagem": (produto.get("imagem") or "").strip(),
             })
 
@@ -147,13 +155,13 @@ class StoreManager:
     # ==========================================
 
     @classmethod
-    def stable_store_names(cls):
+    def stable_store_names(cls) -> list[str]:
 
         return list(cls.STABLE_STORES)
 
     # ==========================================
 
     @classmethod
-    def experimental_store_names(cls):
+    def experimental_store_names(cls) -> list[str]:
 
         return list(cls.EXPERIMENTAL_STORES)

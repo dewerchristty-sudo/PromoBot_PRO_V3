@@ -1,6 +1,9 @@
 import customtkinter as ctk
+import tkinter as tk
+from tkinter import messagebox
 
 from src.core.notifier import Notifier
+from src.core.startup import configure_startup, startup_enabled
 
 
 class SettingsPage(ctk.CTkFrame):
@@ -10,6 +13,7 @@ class SettingsPage(ctk.CTkFrame):
 
         self.database = database
         self.notifier = Notifier()
+        self.start_with_windows = tk.BooleanVar(value=startup_enabled())
 
         self.criar_interface()
 
@@ -38,6 +42,13 @@ class SettingsPage(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 6))
 
         self.aparencia.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 16))
+
+        ctk.CTkSwitch(
+            painel,
+            text="Iniciar o PromoBot automaticamente com o Windows",
+            variable=self.start_with_windows,
+            command=self.toggle_startup,
+        ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 16))
 
         info = ctk.CTkTextbox(self, height=220)
         info.pack(fill="x", padx=20, pady=20)
@@ -68,3 +79,11 @@ class SettingsPage(ctk.CTkFrame):
     def alterar_tema(self, tema):
 
         ctk.set_appearance_mode(tema.lower())
+
+    def toggle_startup(self):
+        try:
+            enabled = configure_startup(self.start_with_windows.get())
+            self.start_with_windows.set(enabled)
+        except Exception as error:
+            self.start_with_windows.set(startup_enabled())
+            messagebox.showerror("Inicialização automática", str(error))

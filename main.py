@@ -1,7 +1,7 @@
 from src.app import PromoBot
 
 
-def main():
+def main() -> None:
     sistema = PromoBot()
     sistema.run()
 

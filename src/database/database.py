@@ -1,7 +1,11 @@
 import re
+import shutil
 import sqlite3
 import sys
 import threading
+import json
+from datetime import date
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from src.scraper import Parser
@@ -25,6 +29,7 @@ class Database:
         self.cursor = self.conn.cursor()
 
         self.criar_tabelas()
+        self.criar_backup_diario()
 
     # ============================================
 
@@ -34,6 +39,31 @@ class Database:
             return Path(sys.executable).resolve().parent / "promobot.db"
 
         return Path("promobot.db")
+
+    # ============================================
+
+    def criar_backup_diario(self):
+
+        backup_dir = self.db.resolve().parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        suffix = date.today().isoformat()
+        database_backup = backup_dir / f"promobot_{suffix}.db"
+
+        if not database_backup.exists():
+            backup_connection = sqlite3.connect(database_backup)
+            try:
+                with self.lock:
+                    self.conn.backup(backup_connection)
+            finally:
+                backup_connection.close()
+
+        config_path = self.db.resolve().parent / ".env"
+        config_backup = backup_dir / f"promobot_env_{suffix}.backup"
+
+        if config_path.exists() and not config_backup.exists():
+            shutil.copy2(config_path, config_backup)
+
+        return database_backup
 
     # ============================================
 
@@ -147,6 +177,98 @@ class Database:
             )
             """)
 
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS links_afiliados(
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                loja TEXT NOT NULL,
+
+                link_original TEXT NOT NULL UNIQUE,
+
+                link_afiliado TEXT NOT NULL,
+
+                etiqueta TEXT DEFAULT '',
+
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+            )
+            """)
+
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS historico_envios(
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loja TEXT,
+                titulo TEXT,
+                link_original TEXT,
+                link_afiliado TEXT,
+                etiqueta TEXT,
+                canal TEXT,
+                destino TEXT,
+                status TEXT,
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+            )
+            """)
+
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notificacoes_manuais(
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                link_original TEXT NOT NULL UNIQUE,
+
+                assinatura TEXT,
+
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+            )
+            """)
+
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS categorias_whatsapp(
+
+                categoria TEXT PRIMARY KEY,
+                palavras TEXT NOT NULL DEFAULT '',
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+            )
+            """)
+
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metricas_grupos(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                destino TEXT NOT NULL,
+                cliques INTEGER DEFAULT 0,
+                vendas INTEGER DEFAULT 0,
+                comissao REAL DEFAULT 0,
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fila_notificacoes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chave TEXT NOT NULL UNIQUE,
+                alerta_json TEXT NOT NULL,
+                tentativas INTEGER DEFAULT 0,
+                ultimo_erro TEXT DEFAULT '',
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ultima_tentativa TIMESTAMP
+            )
+            """)
+
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS eventos_sistema(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nivel TEXT NOT NULL,
+                componente TEXT NOT NULL,
+                mensagem TEXT NOT NULL,
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
             self.conn.commit()
 
             self.migrar_tabelas()
@@ -167,6 +289,37 @@ class Database:
             self.cursor.execute(
                 "ALTER TABLE produtos ADD COLUMN promocao INTEGER DEFAULT 0"
             )
+
+        self.cursor.execute("PRAGMA table_info(links_afiliados)")
+        colunas_links = {coluna["name"] for coluna in self.cursor.fetchall()}
+
+        if "etiqueta" not in colunas_links:
+            self.cursor.execute(
+                "ALTER TABLE links_afiliados ADD COLUMN etiqueta TEXT DEFAULT ''"
+            )
+
+        self.cursor.execute("PRAGMA table_info(notificacoes_manuais)")
+        colunas_manuais = {coluna["name"] for coluna in self.cursor.fetchall()}
+
+        if "assinatura" not in colunas_manuais:
+            self.cursor.execute(
+                "ALTER TABLE notificacoes_manuais ADD COLUMN assinatura TEXT"
+            )
+
+        self.cursor.execute("""
+
+        UPDATE notificacoes_manuais
+
+        SET assinatura = (
+            SELECT lower(trim(p.loja)) || '|' || lower(trim(p.titulo))
+            FROM produtos p
+            WHERE p.link = notificacoes_manuais.link_original
+            LIMIT 1
+        )
+
+        WHERE assinatura IS NULL
+
+        """)
 
         self.cursor.execute("PRAGMA table_info(notificacoes_enviadas)")
         colunas_notificacoes = {
@@ -411,6 +564,409 @@ class Database:
 
     # ============================================
 
+    def salvar_link_afiliado(
+        self,
+        loja,
+        link_original,
+        link_afiliado,
+        etiqueta="promobotwhatsapp",
+    ):
+
+        loja = str(loja or "").strip()
+        link_original = str(link_original or "").strip()
+        link_afiliado = str(link_afiliado or "").strip()
+        etiqueta = str(etiqueta or "").strip()
+
+        if not loja or not link_original or not link_afiliado:
+            raise ValueError("Preencha loja, link original e link afiliado.")
+
+        with self.lock:
+
+            self.cursor.execute("""
+
+            INSERT INTO links_afiliados(
+                loja, link_original, link_afiliado, etiqueta
+            )
+
+            VALUES(?,?,?,?)
+
+            ON CONFLICT(link_original) DO UPDATE SET
+                loja = excluded.loja,
+                link_afiliado = excluded.link_afiliado,
+                etiqueta = excluded.etiqueta,
+                data = CURRENT_TIMESTAMP
+
+            """, (loja, link_original, link_afiliado, etiqueta))
+
+            self.conn.commit()
+
+    # ============================================
+
+    def buscar_link_afiliado(self, link_original):
+
+        with self.lock:
+
+            self.cursor.execute("""
+
+            SELECT link_afiliado
+
+            FROM links_afiliados
+
+            WHERE link_original = ?
+
+            LIMIT 1
+
+            """, (str(link_original or "").strip(),))
+
+            resultado = self.cursor.fetchone()
+
+            return resultado["link_afiliado"] if resultado else ""
+
+    # ============================================
+
+    def listar_produtos_marketplace(self, somente_promocoes=False):
+
+        filtro_promocao = "AND p.promocao = 1" if somente_promocoes else ""
+
+        with self.lock:
+
+            self.cursor.execute(f"""
+
+            SELECT
+                p.*,
+                (
+                    SELECT MAX(h.preco_valor)
+                    FROM historico_precos h
+                    WHERE h.produto_id = p.id
+                ) AS maior_preco
+
+            FROM produtos p
+
+            WHERE (
+                lower(trim(p.loja)) IN ('shopee', 'mercado livre')
+                OR lower(p.link) LIKE '%shopee.com.br%'
+                OR lower(p.link) LIKE '%mercadolivre.com%'
+                OR lower(p.link) LIKE '%mercadolivre.com.br%'
+            )
+
+            {filtro_promocao}
+
+            ORDER BY p.id DESC
+
+            """)
+
+            return self.cursor.fetchall()
+
+    # ============================================
+
+    def total_links_afiliados(self):
+
+        with self.lock:
+            self.cursor.execute("SELECT COUNT(*) FROM links_afiliados")
+            return self.cursor.fetchone()[0]
+
+    # ============================================
+
+    def etiqueta_link_afiliado(self, link_original):
+
+        with self.lock:
+            self.cursor.execute(
+                "SELECT etiqueta FROM links_afiliados WHERE link_original = ?",
+                (str(link_original or "").strip(),),
+            )
+            result = self.cursor.fetchone()
+            return result["etiqueta"] if result else ""
+
+    # ============================================
+
+    def registrar_envio(
+        self,
+        loja,
+        titulo,
+        link_original,
+        link_afiliado,
+        etiqueta,
+        canal,
+        destino,
+        status="enviado",
+    ):
+
+        with self.lock:
+            self.cursor.execute("""
+
+            INSERT INTO historico_envios(
+                loja, titulo, link_original, link_afiliado, etiqueta,
+                canal, destino, status
+            )
+
+            VALUES(?,?,?,?,?,?,?,?)
+
+            """, (
+                loja,
+                titulo,
+                link_original,
+                link_afiliado,
+                etiqueta,
+                canal,
+                destino,
+                status,
+            ))
+            self.conn.commit()
+
+    # ============================================
+
+    def listar_historico_envios(self, limite=30):
+
+        with self.lock:
+            self.cursor.execute("""
+
+            SELECT * FROM historico_envios
+
+            ORDER BY id DESC
+
+            LIMIT ?
+
+            """, (max(int(limite), 1),))
+            return self.cursor.fetchall()
+
+    # ============================================
+
+    def contar_envios_recentes(self, minutos=60, canal="WhatsApp"):
+
+        with self.lock:
+            self.cursor.execute("""
+
+            SELECT COUNT(*)
+
+            FROM historico_envios
+
+            WHERE canal = ?
+                AND status = 'enviado'
+                AND data >= datetime('now', ?)
+
+            """, (canal, f"-{max(int(minutos), 1)} minutes"))
+            return self.cursor.fetchone()[0]
+
+    def contar_envios_destino_recentes(
+        self, destino, minutos=60, canal="WhatsApp"
+    ):
+
+        with self.lock:
+            self.cursor.execute("""
+            SELECT COUNT(*) FROM historico_envios
+            WHERE canal = ? AND destino = ? AND status = 'enviado'
+                AND data >= datetime('now', ?)
+            """, (canal, destino, f"-{max(int(minutos), 1)} minutes"))
+            return self.cursor.fetchone()[0]
+
+    def relatorio_envios_por_destino(self, dias=30):
+
+        with self.lock:
+            self.cursor.execute("""
+            SELECT destino, COUNT(*) AS total,
+                   COUNT(DISTINCT link_original) AS produtos,
+                   MAX(data) AS ultimo_envio
+            FROM historico_envios
+            WHERE canal = 'WhatsApp' AND status = 'enviado'
+                AND data >= datetime('now', ?)
+            GROUP BY destino ORDER BY total DESC
+            """, (f"-{max(int(dias), 1)} days",))
+            return self.cursor.fetchall()
+
+    def salvar_palavras_categoria(self, categoria, palavras):
+
+        with self.lock:
+            self.cursor.execute("""
+            INSERT INTO categorias_whatsapp(categoria, palavras, atualizado_em)
+            VALUES(?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(categoria) DO UPDATE SET
+                palavras=excluded.palavras,
+                atualizado_em=CURRENT_TIMESTAMP
+            """, (str(categoria).strip(), str(palavras).strip()))
+            self.conn.commit()
+
+    def listar_palavras_categorias(self):
+
+        with self.lock:
+            self.cursor.execute(
+                "SELECT categoria, palavras FROM categorias_whatsapp"
+            )
+            return {
+                row["categoria"]: [
+                    word.strip() for word in row["palavras"].split(",")
+                    if word.strip()
+                ]
+                for row in self.cursor.fetchall()
+            }
+
+    def registrar_metricas_grupo(self, destino, cliques=0, vendas=0, comissao=0):
+
+        with self.lock:
+            self.cursor.execute("""
+            INSERT INTO metricas_grupos(destino, cliques, vendas, comissao)
+            VALUES(?,?,?,?)
+            """, (destino, int(cliques), int(vendas), float(comissao)))
+            self.conn.commit()
+
+    def relatorio_metricas_grupos(self, dias=30):
+
+        with self.lock:
+            self.cursor.execute("""
+            SELECT destino, SUM(cliques) AS cliques, SUM(vendas) AS vendas,
+                   SUM(comissao) AS comissao
+            FROM metricas_grupos WHERE data >= datetime('now', ?)
+            GROUP BY destino
+            """, (f"-{max(int(dias), 1)} days",))
+            return {row["destino"]: row for row in self.cursor.fetchall()}
+
+    def enfileirar_notificacoes(self, alertas, erro=""):
+
+        with self.lock:
+            for alerta in alertas:
+                item = dict(alerta)
+                chave = str(item.get("link") or item.get("assinatura") or "").strip()
+                if not chave:
+                    continue
+                self.cursor.execute("""
+                INSERT INTO fila_notificacoes(chave, alerta_json, tentativas, ultimo_erro)
+                VALUES(?,?,1,?)
+                ON CONFLICT(chave) DO UPDATE SET
+                    alerta_json=excluded.alerta_json,
+                    tentativas=fila_notificacoes.tentativas + 1,
+                    ultimo_erro=excluded.ultimo_erro,
+                    ultima_tentativa=CURRENT_TIMESTAMP
+                """, (chave, json.dumps(item, ensure_ascii=False, default=str), str(erro)[:500]))
+            self.conn.commit()
+
+    def listar_fila_notificacoes(self, limite=20):
+
+        with self.lock:
+            self.cursor.execute(
+                "SELECT * FROM fila_notificacoes ORDER BY id LIMIT ?",
+                (max(int(limite), 1),),
+            )
+            rows = self.cursor.fetchall()
+            return [(row, json.loads(row["alerta_json"])) for row in rows]
+
+    def remover_fila_notificacoes(self, ids):
+
+        ids = [int(item) for item in ids]
+        if not ids:
+            return
+        with self.lock:
+            marks = ",".join("?" for _ in ids)
+            self.cursor.execute(f"DELETE FROM fila_notificacoes WHERE id IN ({marks})", ids)
+            self.conn.commit()
+
+    def total_fila_notificacoes(self):
+
+        with self.lock:
+            self.cursor.execute("SELECT COUNT(*) FROM fila_notificacoes")
+            return self.cursor.fetchone()[0]
+
+    def registrar_evento_sistema(self, nivel, componente, mensagem):
+
+        with self.lock:
+            self.cursor.execute("""
+            INSERT INTO eventos_sistema(nivel, componente, mensagem) VALUES(?,?,?)
+            """, (nivel, componente, str(mensagem)[:1000]))
+            self.cursor.execute("""
+            DELETE FROM eventos_sistema WHERE id NOT IN (
+                SELECT id FROM eventos_sistema ORDER BY id DESC LIMIT 1000
+            )
+            """)
+            self.conn.commit()
+
+    def listar_eventos_sistema(self, limite=20):
+
+        with self.lock:
+            self.cursor.execute(
+                "SELECT * FROM eventos_sistema ORDER BY id DESC LIMIT ?",
+                (max(int(limite), 1),),
+            )
+            return self.cursor.fetchall()
+
+    # ============================================
+
+    def produto_ja_notificado(self, link_original, loja="", titulo=""):
+
+        link_original = str(link_original or "").strip()
+        assinatura = self.normalizar_assinatura(loja) + "|" + self.normalizar_assinatura(titulo)
+        assinatura = assinatura if assinatura != "|" else ""
+
+        with self.lock:
+
+            self.cursor.execute("""
+
+            SELECT 1 FROM notificacoes_manuais
+            WHERE link_original = ? OR assinatura = ?
+
+            UNION ALL
+
+            SELECT 1 FROM notificacoes_enviadas
+            WHERE link = ? OR assinatura = ?
+
+            LIMIT 1
+
+            """, (link_original, assinatura, link_original, assinatura))
+
+            if self.cursor.fetchone() is not None:
+                return True
+
+            if not titulo:
+                return False
+
+            self.cursor.execute("""
+            SELECT titulo FROM historico_envios
+            WHERE lower(trim(loja)) = lower(trim(?)) AND status = 'enviado'
+            ORDER BY id DESC LIMIT 1000
+            """, (str(loja or ""),))
+            return any(
+                self.titulos_semelhantes(titulo, row["titulo"])
+                for row in self.cursor.fetchall()
+            )
+
+    def titulos_semelhantes(self, primeiro, segundo):
+
+        first = self.normalizar_titulo_produto(primeiro)
+        second = self.normalizar_titulo_produto(segundo)
+        if not first or not second:
+            return False
+        if SequenceMatcher(None, first, second).ratio() >= 0.88:
+            return True
+        first_tokens = set(first.split())
+        second_tokens = set(second.split())
+        union = first_tokens | second_tokens
+        return bool(union) and len(first_tokens & second_tokens) / len(union) >= 0.78
+
+    def normalizar_titulo_produto(self, texto):
+
+        text = self.normalizar_assinatura(texto)
+        text = re.sub(r"\b(preto|branco|azul|vermelho|rosa|cinza|novo|oferta)\b", " ", text)
+        text = re.sub(r"\b\d+\s*(gb|tb|ml|l|kg|w|v|polegadas?)\b", " ", text)
+        return re.sub(r"[^a-z0-9áàâãéêíóôõúç]+", " ", text).strip()
+
+    # ============================================
+
+    def marcar_notificacao_manual(self, link_original, loja="", titulo=""):
+
+        assinatura = self.normalizar_assinatura(loja) + "|" + self.normalizar_assinatura(titulo)
+        assinatura = assinatura if assinatura != "|" else None
+
+        with self.lock:
+
+            self.cursor.execute("""
+
+            INSERT OR IGNORE INTO notificacoes_manuais(link_original, assinatura)
+
+            VALUES(?,?)
+
+            """, (str(link_original or "").strip(), assinatura))
+
+            self.conn.commit()
+
+    # ============================================
+
     def criar_alerta(self, termo, preco_alvo):
 
         termo = termo.strip()
@@ -508,6 +1064,7 @@ class Database:
                 p.titulo,
                 p.preco,
                 p.preco_valor,
+                p.data,
                 lower(trim(p.loja)) || '|' || lower(trim(p.titulo)) AS assinatura,
                 (
                     SELECT MAX(h.preco_valor)
@@ -562,6 +1119,7 @@ class Database:
                 p.titulo,
                 p.preco,
                 p.preco_valor,
+                p.data,
                 lower(trim(p.loja)) || '|' || lower(trim(p.titulo)) AS assinatura,
                 (
                     SELECT MAX(h.preco_valor)
@@ -591,8 +1149,7 @@ class Database:
                 )
 
             LEFT JOIN notificacoes_enviadas n
-                ON n.alerta_id = a.id
-                AND (
+                ON (
                     n.link = p.link
                     OR n.assinatura = lower(trim(p.loja)) || '|' || lower(trim(p.titulo))
                 )
@@ -600,7 +1157,7 @@ class Database:
             WHERE a.ativo = 1
                 AND n.id IS NULL
 
-            GROUP BY a.id, lower(trim(p.loja)), lower(trim(p.titulo))
+            GROUP BY lower(trim(p.loja)), lower(trim(p.titulo))
 
             ORDER BY
                 p.preco_valor ASC,
@@ -650,7 +1207,7 @@ class Database:
 
         for alerta in alertas:
             assinatura = self.assinatura_notificacao(alerta)
-            chave = (alerta["alerta_id"], assinatura or alerta["link"])
+            chave = assinatura or alerta["link"]
 
             if chave in vistos:
                 continue
@@ -675,15 +1232,14 @@ class Database:
 
         FROM notificacoes_enviadas
 
-        WHERE alerta_id = ?
-            AND (
+        WHERE (
                 link = ?
                 OR assinatura = ?
             )
 
         LIMIT 1
 
-        """, (alerta["alerta_id"], alerta["link"], assinatura))
+        """, (alerta["link"], assinatura))
 
         return self.cursor.fetchone() is not None
 

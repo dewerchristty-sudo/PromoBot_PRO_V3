@@ -12,7 +12,7 @@ class AlertsPage(ctk.CTkFrame):
 
         self.database = database
         self.alertas = []
-        self.notifier = Notifier()
+        self.notifier = Notifier(database)
 
         self.criar_interface()
         self.carregar()

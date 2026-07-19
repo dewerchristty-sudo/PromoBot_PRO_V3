@@ -5,9 +5,9 @@ resultados em SQLite e exportar a lista para CSV.
 
 ## Funcionalidades
 
-- Busca principal em Mercado Livre, Amazon e Kabum.
-- Lojas opcionais/experimentais: Terabyte, Americanas, Pichau, Magalu,
-  Casas Bahia e Shopee.
+- Busca principal em Mercado Livre e Shopee.
+- Lojas opcionais/experimentais: Amazon, Kabum, Terabyte, Americanas, Pichau,
+  Magalu e Casas Bahia.
 - Salvamento automatico dos produtos encontrados em `promobot.db`.
 - Dashboard com total de produtos, lojas e itens recentes.
 - Tela de produtos com filtro, atualizacao, exportacao CSV e limpeza do banco.
@@ -82,9 +82,13 @@ EVOLUTION_API_URL=http://localhost:8080
 EVOLUTION_INSTANCE=promobot
 EVOLUTION_API_KEY=
 WHATSAPP_PHONES=5511999999999,5527999999999
+WHATSAPP_GROUPS=120363000000000000@g.us
 ```
 
-Use ate 10 numeros separados por virgula, sempre no formato `55 + DDD + numero`.
+Use ate 10 numeros e ate 10 grupos separados por virgula. Os numeros devem
+estar no formato `55 + DDD + numero`; os IDs de grupo da Evolution API terminam
+em `@g.us`. Voce pode deixar `WHATSAPP_PHONES` vazio para notificar somente os
+grupos configurados em `WHATSAPP_GROUPS`.
 
 Depois de instalar o Docker Desktop, inicie a Evolution API local com:
 

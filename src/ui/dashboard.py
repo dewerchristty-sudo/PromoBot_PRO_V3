@@ -3,10 +3,11 @@ import customtkinter as ctk
 
 class Dashboard(ctk.CTkFrame):
 
-    def __init__(self, master, database):
+    def __init__(self, master, database, monitor_runner=None):
         super().__init__(master)
 
         self.database = database
+        self.monitor_runner = monitor_runner
 
         self.criar_interface()
 
@@ -26,10 +27,17 @@ class Dashboard(ctk.CTkFrame):
         self.lbl_promocoes = self.criar_card("Ofertas", "0", 2)
         self.lbl_menor = self.criar_card("Menor preco", "-", 3)
 
+        self.health_label = ctk.CTkLabel(
+            self, text="🔵 Verificando funcionamento...", anchor="w",
+            font=("Arial", 15, "bold")
+        )
+        self.health_label.pack(fill="x", padx=30, pady=(12, 0))
+
         self.console = ctk.CTkTextbox(self, height=350)
         self.console.pack(fill="both", expand=True, padx=20, pady=20)
 
         self.atualizar()
+        self.after(5000, self.update_health)
 
     def criar_card(self, titulo, valor, coluna):
 
@@ -98,3 +106,24 @@ class Dashboard(ctk.CTkFrame):
 
         self.console.insert("end", mensagem + "\n")
         self.console.see("end")
+
+    def update_health(self):
+        if not self.winfo_exists():
+            return
+        if not self.monitor_runner:
+            self.health_label.configure(text="🔵 Supervisor indisponível")
+        else:
+            health = self.monitor_runner.health_status()
+            monitor_ok = health["monitor"] == "funcionando"
+            whatsapp_ok = health["whatsapp"] == "conectado"
+            if monitor_ok and whatsapp_ok:
+                icon, status = "🟢", "Bot e WhatsApp funcionando"
+            elif not whatsapp_ok:
+                icon, status = "🔴", f"WhatsApp: {health['whatsapp']}"
+            else:
+                icon, status = "🟡", f"Monitor: {health['monitor']}"
+            self.health_label.configure(
+                text=(f"{icon} {status} | Fila de recuperação: {health['queue']} | "
+                      f"Último ciclo: {health['last_cycle'] or 'aguardando'}")
+            )
+        self.after(5000, self.update_health)

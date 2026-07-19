@@ -1,8 +1,10 @@
 from bs4 import BeautifulSoup
-from urllib.parse import parse_qs
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+import logging
 
 from src.stores.base_store import BaseStore
+
+logger = logging.getLogger(__name__)
 
 
 class MercadoLivre(BaseStore):
@@ -96,7 +98,8 @@ class MercadoLivre(BaseStore):
 
                     })
 
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Erro ao processar item do Mercado Livre: {str(e)}")
                     continue
 
             print(

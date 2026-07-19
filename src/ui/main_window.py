@@ -1,6 +1,9 @@
+import threading
+
 import customtkinter as ctk
 
 from src.core.monitor import MonitorRunner
+from src.ui.affiliate_links_page import AffiliateLinksPage
 from src.ui.alerts_page import AlertsPage
 from src.ui.dashboard import Dashboard
 from src.ui.history_page import HistoryPage
@@ -9,6 +12,7 @@ from src.ui.offers_page import OffersPage
 from src.ui.search_page import SearchPage
 from src.ui.products_page import ProductsPage
 from src.ui.settings_page import SettingsPage
+from src.ui.groups_page import GroupsPage
 
 
 class MainWindow(ctk.CTk):
@@ -17,7 +21,10 @@ class MainWindow(ctk.CTk):
         super().__init__()
 
         self.database = database
+        self.background_workers = set()
+        self.background_workers_lock = threading.Lock()
         self.monitor_runner = MonitorRunner(database, self.log_monitor_status)
+        self.monitor_runner.start_supervisor()
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -68,6 +75,10 @@ class MainWindow(ctk.CTk):
             ("Ofertas", self.mostrar_ofertas),
 
             ("Alertas", self.mostrar_alertas),
+
+            ("Links Afiliados", self.mostrar_links_afiliados),
+
+            ("Grupos & Categorias", self.mostrar_grupos),
 
             ("Monitor", self.mostrar_monitor),
 
@@ -124,7 +135,7 @@ class MainWindow(ctk.CTk):
 
         self.limpar()
 
-        dashboard = Dashboard(self.area, self.database)
+        dashboard = Dashboard(self.area, self.database, self.monitor_runner)
 
         dashboard.pack(
             fill="both",
@@ -228,6 +239,24 @@ class MainWindow(ctk.CTk):
 
     # ===============================================
 
+    def mostrar_links_afiliados(self):
+
+        self.limpar()
+
+        AffiliateLinksPage(
+            self.area,
+            self.database
+        ).pack(
+            fill="both",
+            expand=True
+        )
+
+        self.status.configure(
+            text="Links de afiliado pendentes"
+        )
+
+    # ===============================================
+
     def mostrar_ofertas(self):
 
         self.limpar()
@@ -243,6 +272,12 @@ class MainWindow(ctk.CTk):
         self.status.configure(
             text="Ofertas"
         )
+
+    def mostrar_grupos(self):
+
+        self.limpar()
+        GroupsPage(self.area, self.database).pack(fill="both", expand=True)
+        self.status.configure(text="Grupos, categorias e relatórios")
 
     # ===============================================
 
@@ -281,9 +316,29 @@ class MainWindow(ctk.CTk):
 
         self.after(0, lambda: self.status.configure(text=texto))
 
+    def register_background_worker(self, worker):
+
+        with self.background_workers_lock:
+            self.background_workers.add(worker)
+
+    def unregister_background_worker(self, worker):
+
+        with self.background_workers_lock:
+            self.background_workers.discard(worker)
+
+    def wait_for_background_workers(self):
+
+        current = threading.current_thread()
+        with self.background_workers_lock:
+            workers = list(self.background_workers)
+        for worker in workers:
+            if worker is not current:
+                worker.join()
+
     # ===============================================
 
     def fechar(self):
 
-        self.monitor_runner.stop()
+        self.monitor_runner.shutdown()
+        self.wait_for_background_workers()
         self.destroy()
