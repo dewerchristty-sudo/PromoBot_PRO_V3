@@ -1,12 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+from pathlib import Path
+
 block_cipher = None
+
+playwright_root = Path(os.environ["LOCALAPPDATA"]) / "ms-playwright"
+browser_data = []
+for pattern in ("chromium_headless_shell-*", "ffmpeg-*"):
+    matches = sorted(playwright_root.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(
+            f"Componente Playwright ausente: {pattern}. Execute playwright install chromium."
+        )
+    source = matches[-1]
+    browser_data.append((str(source), f"ms-playwright/{source.name}"))
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=browser_data,
     hiddenimports=[
         'customtkinter',
         'PIL',
@@ -16,7 +30,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['src/runtime_playwright.py'],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
