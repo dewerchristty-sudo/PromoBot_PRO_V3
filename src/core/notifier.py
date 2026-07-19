@@ -211,6 +211,49 @@ class Notifier:
 
         return "Configure WhatsApp no arquivo .env."
 
+    def send_test_alert(self, item):
+
+        if self.database is None:
+            return "Falha no teste: banco de dados indisponivel."
+
+        image = str(self.value(item, "imagem", "") or "").strip()
+        if not image.startswith("http"):
+            return "Falha no teste: produto sem imagem valida."
+
+        ready, blocked = self.partition_affiliate_ready([item])
+        if blocked or not ready:
+            return "Falha no teste: link afiliado oficial nao validado."
+
+        recipients = self.whatsapp_recipients_for_alert(item)
+        if len(recipients) != 1:
+            return "Falha no teste: grupo de destino nao configurado."
+
+        if not self.whatsapp_configured():
+            return "Falha no teste: WhatsApp nao configurado."
+
+        recipient = recipients[0]
+        if self.whatsapp_group_rate_limited(recipient):
+            return "Falha no teste: limite horario do grupo atingido."
+
+        message = "\U0001f9ea TESTE CONTROLADO DO PROMOBOT\n\n" + self.format_alert(item)
+
+        try:
+            self.send_whatsapp_message(message, image, recipient)
+            original_link = self.value(item, "link", "") or ""
+            self.database.registrar_envio(
+                self.value(item, "loja", "") or "",
+                self.value(item, "titulo", "") or "",
+                original_link,
+                self.affiliate_link(item),
+                self.database.etiqueta_link_afiliado(original_link),
+                "WhatsApp Teste",
+                recipient,
+            )
+        except Exception as error:
+            return f"Falha no teste: {error}"
+
+        return "Teste enviado por WhatsApp para 1 grupo."
+
     def partition_enabled_stores(self, alerts):
 
         disabled_names = {

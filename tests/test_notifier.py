@@ -611,6 +611,33 @@ class NotifierTest(unittest.TestCase):
 
         self.assertIn("aguardando limite horario", result)
 
+    def test_envio_controlado_ignora_horario_mas_exige_protecoes(self):
+
+        database = Mock()
+        database.etiqueta_link_afiliado.return_value = "teste"
+        notifier = Notifier(database)
+        notifier.partition_affiliate_ready = Mock(return_value=([{}], []))
+        notifier.whatsapp_recipients_for_alert = Mock(return_value=["grupo@g.us"])
+        notifier.whatsapp_configured = Mock(return_value=True)
+        notifier.whatsapp_group_rate_limited = Mock(return_value=False)
+        notifier.affiliate_link = Mock(return_value="https://meli.la/teste")
+        notifier.send_whatsapp_message = Mock(return_value=True)
+        item = {
+            "loja": "Mercado Livre",
+            "titulo": "Produto de teste",
+            "link": "https://example.com/produto",
+            "imagem": "https://example.com/produto.jpg",
+            "preco": "99,90",
+        }
+
+        result = notifier.send_test_alert(item)
+
+        self.assertEqual(result, "Teste enviado por WhatsApp para 1 grupo.")
+        message = notifier.send_whatsapp_message.call_args.args[0]
+        self.assertTrue(message.startswith("\U0001f9ea TESTE CONTROLADO"))
+        database.registrar_envio.assert_called_once()
+        self.assertEqual(database.registrar_envio.call_args.args[5], "WhatsApp Teste")
+
     @patch.dict("os.environ", {
         "NOTIFICATION_START_HOUR": "23",
         "NOTIFICATION_END_HOUR": "23",

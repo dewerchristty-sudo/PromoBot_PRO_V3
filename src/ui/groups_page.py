@@ -61,6 +61,13 @@ class GroupsPage(ctk.CTkFrame):
         ctk.CTkButton(
             testing, text="Validar oferta antes de publicar", command=self.test_offer
         ).pack(pady=8)
+        ctk.CTkButton(
+            testing,
+            text="Enviar teste controlado para o grupo",
+            fg_color="#9a6700",
+            hover_color="#7a5200",
+            command=self.send_controlled_test,
+        ).pack(pady=(0, 8))
         self.test_result = ctk.CTkTextbox(testing)
         self.test_result.pack(fill="both", expand=True, padx=14, pady=(8, 14))
 
@@ -165,6 +172,36 @@ class GroupsPage(ctk.CTkFrame):
         for label, value, ok in checks:
             self.test_result.insert("end", f"{'OK' if ok else 'ATENÇÃO'} | {label}: {value}\n")
         self.test_result.insert("end", "\nPrévia:\n\n" + self.notifier.format_alert(product))
+
+    def send_controlled_test(self):
+        product = self.products_by_label.get(self.product_menu.get())
+        if not product:
+            messagebox.showerror("Teste controlado", "Selecione um produto.")
+            return
+
+        category = self.notifier.whatsapp_category(product)
+        group = self.notifier.whatsapp_recipients_for_alert(product)
+        label = self.LABELS.get(category, "categoria nao identificada")
+        if len(group) != 1:
+            messagebox.showerror(
+                "Teste controlado",
+                "O produto nao possui um unico grupo de destino configurado.",
+            )
+            return
+
+        confirmed = messagebox.askyesno(
+            "Confirmar teste controlado",
+            f"Enviar 1 mensagem marcada como TESTE para o grupo {label}?",
+        )
+        if not confirmed:
+            return
+
+        result = self.notifier.send_test_alert(product)
+        if result.startswith("Teste enviado"):
+            messagebox.showinfo("Teste controlado", result)
+            self.load_report()
+        else:
+            messagebox.showerror("Teste controlado", result)
 
     def load_report(self):
         self.report_text.delete("1.0", "end")
