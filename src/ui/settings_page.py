@@ -12,7 +12,7 @@ class SettingsPage(ctk.CTkFrame):
         super().__init__(master)
 
         self.database = database
-        self.notifier = Notifier()
+        self.notifier = Notifier(database)
         self.start_with_windows = tk.BooleanVar(value=startup_enabled())
 
         self.criar_interface()
@@ -54,25 +54,30 @@ class SettingsPage(ctk.CTkFrame):
         info.pack(fill="x", padx=20, pady=20)
         canais = self.notifier.configured_channels()
         canais_texto = ", ".join(canais) if canais else "nenhum canal configurado"
+        grupos = self.notifier.whatsapp_category_groups()
+        integridade = self.database.verificar_integridade()
 
         info.insert(
             "end",
-            "Lojas ativas:\n"
+            "Diagnostico local:\n"
+            f"- Banco: {integridade}\n"
+            f"- Produtos: {self.database.total_produtos()}\n"
+            f"- Links afiliados: {self.database.total_links_afiliados()}\n"
+            f"- Fila de recuperacao: {self.database.total_fila_notificacoes()}\n"
+            f"- Grupos por categoria: {len(grupos)}/6\n\n"
+            "Lojas principais:\n"
             "- Mercado Livre\n"
-            "- Amazon\n"
-            "- Kabum\n"
-            "- Terabyte\n"
-            "- Pichau\n"
-            "- Magalu\n"
-            "- Casas Bahia\n"
-            "- Americanas\n"
             "- Shopee (pode bloquear automacao em alguns ambientes)\n\n"
+            "Lojas experimentais:\n"
+            "- Amazon, Kabum, Terabyte, Pichau, Magalu, Casas Bahia e Americanas\n\n"
             "Banco de dados:\n"
             "- promobot.db\n\n"
             "Notificacoes:\n"
             f"- {canais_texto}\n"
+            "- Envios automaticos respeitam o horario definido no .env\n"
+            "- Testes controlados exigem confirmacao manual\n"
             "- Configure .env usando .env.example como modelo\n\n"
-            "Os produtos duplicados sao atualizados pelo link."
+            "Backups futuros do .env ocultam credenciais automaticamente."
         )
         info.configure(state="disabled")
 

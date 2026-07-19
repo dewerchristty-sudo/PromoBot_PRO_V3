@@ -40,6 +40,27 @@ class DatabaseTest(unittest.TestCase):
 
         self.assertEqual(len(backups), 1)
 
+    def test_redige_segredos_do_backup_de_configuracao(self):
+
+        content = (
+            "WHATSAPP_PROVIDER=evolution\n"
+            "EVOLUTION_API_KEY=segredo\n"
+            "WHATSAPP_GROUPS=grupo@g.us\n"
+            "NOTIFICATION_START_HOUR=8\n"
+        )
+
+        redacted = Database.redact_env_content(content)
+
+        self.assertIn("WHATSAPP_PROVIDER=evolution", redacted)
+        self.assertIn("EVOLUTION_API_KEY=<redacted>", redacted)
+        self.assertIn("WHATSAPP_GROUPS=<redacted>", redacted)
+        self.assertIn("NOTIFICATION_START_HOUR=8", redacted)
+        self.assertNotIn("segredo", redacted)
+
+    def test_verifica_integridade_do_banco(self):
+
+        self.assertEqual(self.database.verificar_integridade(), "ok")
+
     def test_salva_e_recupera_link_afiliado(self):
 
         original = "https://www.mercadolivre.com.br/produto/p/MLB65442354"

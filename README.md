@@ -16,6 +16,9 @@ resultados em SQLite e exportar a lista para CSV.
 - Historico de preco por coleta para detectar baixas reais ao longo do tempo.
 - Alertas de preco por termo e valor alvo.
 - Notificacoes por Telegram e WhatsApp via webhook/API.
+- Roteamento do WhatsApp para seis grupos por categoria.
+- Modo de teste controlado, com confirmacao manual e identificacao na mensagem.
+- Links afiliados oficiais de Mercado Livre e Shopee salvos no banco.
 - Monitoramento automatico por termo e intervalo em minutos.
 - Historico com resumo por loja e ultimos produtos salvos.
 - Configuracao de tema da interface.
@@ -46,7 +49,7 @@ python main.py
 ## Testar
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m pytest -q
 ```
 
 ## Gerar executavel
@@ -60,6 +63,16 @@ O executavel sera criado em:
 ```text
 dist\PromoBot_PRO_V3\PromoBot_PRO_V3.exe
 ```
+
+A distribuicao inclui o Chromium headless do Playwright. Para levar o PromoBot
+a outro computador, copie ou compacte a pasta `dist\PromoBot_PRO_V3` inteira;
+o executavel depende da pasta `_internal`.
+
+Se o pacote incluir `install_portable.ps1`, deixe o script ao lado do
+executavel, clique nele com o botao direito e escolha `Executar com PowerShell`.
+Ele instala sem permissao de administrador em `%LOCALAPPDATA%\Programs`, cria
+atalhos na Area de Trabalho e no Menu Iniciar e preserva dados existentes em
+atualizacoes.
 
 ## Criar atalho na area de trabalho
 
@@ -89,6 +102,10 @@ Use ate 10 numeros e ate 10 grupos separados por virgula. Os numeros devem
 estar no formato `55 + DDD + numero`; os IDs de grupo da Evolution API terminam
 em `@g.us`. Voce pode deixar `WHATSAPP_PHONES` vazio para notificar somente os
 grupos configurados em `WHATSAPP_GROUPS`.
+
+Os envios automaticos respeitam `NOTIFICATION_START_HOUR` e
+`NOTIFICATION_END_HOUR`. O modo de teste controlado fica na tela
+`Grupos & Categorias`, exige confirmacao manual e nao altera essa protecao.
 
 Depois de instalar o Docker Desktop, inicie a Evolution API local com:
 
@@ -138,6 +155,10 @@ tabela `historico_precos`.
 
 Use a tela Monitor para cadastrar buscas recorrentes. O monitor usa as lojas
 confiaveis por padrao e salva cada coleta no historico.
+
+O banco recebe backup diario na pasta `backups`. O resumo de configuracao salvo
+junto ao backup oculta tokens, chaves, telefones, grupos e dados de afiliacao;
+o arquivo `.env` original nunca deve ser compartilhado.
 
 Para monitorar varios tipos de produto, use o botao `Categorias padrao` na tela
 Monitor. Ele cadastra termos amplos como notebook, smartphone, TV, air fryer,

@@ -1,5 +1,4 @@
 import re
-import shutil
 import sqlite3
 import sys
 import threading
@@ -12,6 +11,16 @@ from src.scraper import Parser
 
 
 class Database:
+
+    SENSITIVE_ENV_MARKERS = (
+        "TOKEN",
+        "KEY",
+        "SECRET",
+        "PASSWORD",
+        "PHONE",
+        "GROUP",
+        "AFFILIATE",
+    )
 
     def __init__(self, db_path=None):
 
@@ -58,12 +67,38 @@ class Database:
                 backup_connection.close()
 
         config_path = self.db.resolve().parent / ".env"
-        config_backup = backup_dir / f"promobot_env_{suffix}.backup"
+        config_backup = backup_dir / f"promobot_env_{suffix}.redacted"
 
         if config_path.exists() and not config_backup.exists():
-            shutil.copy2(config_path, config_backup)
+            content = config_path.read_text(encoding="utf-8")
+            config_backup.write_text(
+                self.redact_env_content(content),
+                encoding="utf-8",
+            )
 
         return database_backup
+
+    @classmethod
+    def redact_env_content(cls, content):
+
+        redacted = []
+        for line in str(content or "").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in line:
+                redacted.append(line)
+                continue
+            key, value = line.split("=", 1)
+            normalized_key = key.strip().upper()
+            if any(marker in normalized_key for marker in cls.SENSITIVE_ENV_MARKERS):
+                value = "<redacted>" if value.strip() else ""
+            redacted.append(f"{key}={value}")
+        return "\n".join(redacted) + "\n"
+
+    def verificar_integridade(self):
+
+        with self.lock:
+            self.cursor.execute("PRAGMA integrity_check")
+            return self.cursor.fetchone()[0]
 
     # ============================================
 
