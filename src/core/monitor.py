@@ -64,7 +64,7 @@ class MonitorRunner:
             self.thread.join()
         self.log("Monitoramento parado.")
 
-    def shutdown(self):
+    def shutdown(self, timeout=5):
 
         self.stop_event.set()
         self.supervisor_stop_event.set()
@@ -72,14 +72,24 @@ class MonitorRunner:
         self.health["monitor"] = "parado"
 
         current = threading.current_thread()
+        deadline = time.monotonic() + max(float(timeout), 0)
         for worker in (self.thread, self.supervisor_thread):
             if worker and worker is not current:
-                worker.join()
+                worker.join(max(deadline - time.monotonic(), 0))
 
         # A manual run_once can use a separate UI thread. Waiting for this lock
         # guarantees that the database can be closed safely afterwards.
-        with self.execution_lock:
-            pass
+        acquired = self.execution_lock.acquire(
+            timeout=max(deadline - time.monotonic(), 0)
+        )
+        if acquired:
+            self.execution_lock.release()
+
+        workers_stopped = all(
+            not worker or worker is current or not worker.is_alive()
+            for worker in (self.thread, self.supervisor_thread)
+        )
+        return acquired and workers_stopped
 
     def set_progress_callback(self, progress_callback):
 

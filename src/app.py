@@ -25,6 +25,9 @@ class PromoBot:
         try:
             self.app.mainloop()
         finally:
-            self.app.monitor_runner.shutdown()
-            self.app.wait_for_background_workers()
-            self.database.fechar()
+            clean = self.app.shutdown_clean
+            if clean is None:
+                clean = self.app.monitor_runner.shutdown(timeout=5)
+                clean = self.app.wait_for_background_workers(timeout=5) and clean
+            if clean:
+                self.database.fechar()

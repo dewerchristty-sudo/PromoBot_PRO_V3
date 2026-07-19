@@ -1,4 +1,5 @@
 import threading
+import time
 
 import customtkinter as ctk
 
@@ -23,6 +24,7 @@ class MainWindow(ctk.CTk):
         self.database = database
         self.background_workers = set()
         self.background_workers_lock = threading.Lock()
+        self.shutdown_clean = None
         self.monitor_runner = MonitorRunner(database, self.log_monitor_status)
         self.monitor_runner.start_supervisor()
 
@@ -326,19 +328,25 @@ class MainWindow(ctk.CTk):
         with self.background_workers_lock:
             self.background_workers.discard(worker)
 
-    def wait_for_background_workers(self):
+    def wait_for_background_workers(self, timeout=5):
 
         current = threading.current_thread()
+        deadline = time.monotonic() + max(float(timeout), 0)
         with self.background_workers_lock:
             workers = list(self.background_workers)
         for worker in workers:
             if worker is not current:
-                worker.join()
+                worker.join(max(deadline - time.monotonic(), 0))
+        return all(
+            worker is current or not worker.is_alive()
+            for worker in workers
+        )
 
     # ===============================================
 
     def fechar(self):
 
-        self.monitor_runner.shutdown()
-        self.wait_for_background_workers()
+        monitor_clean = self.monitor_runner.shutdown(timeout=5)
+        workers_clean = self.wait_for_background_workers(timeout=5)
+        self.shutdown_clean = monitor_clean and workers_clean
         self.destroy()

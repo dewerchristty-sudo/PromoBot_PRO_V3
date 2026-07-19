@@ -111,6 +111,30 @@ class MonitorRunnerTest(unittest.TestCase):
         shutdown.join(1)
         self.assertFalse(shutdown.is_alive())
 
+    def test_shutdown_tem_limite_quando_execucao_nao_responde(self):
+
+        runner = MonitorRunner(self.make_idle_database())
+        iniciou = threading.Event()
+        liberar = threading.Event()
+
+        def execucao_lenta():
+            with runner.execution_lock:
+                iniciou.set()
+                liberar.wait(1)
+
+        worker = threading.Thread(target=execucao_lenta, daemon=True)
+        worker.start()
+        self.assertTrue(iniciou.wait(1))
+
+        started = time.monotonic()
+        clean = runner.shutdown(timeout=0.02)
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(clean)
+        self.assertLess(elapsed, 0.5)
+        liberar.set()
+        worker.join(1)
+
 
 if __name__ == "__main__":
     unittest.main()
