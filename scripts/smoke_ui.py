@@ -36,15 +36,22 @@ def main() -> None:
 
         pages = (
             window.mostrar_dashboard,
+            window.mostrar_central_categorias,
+            window.mostrar_ofertas_do_dia,
             window.mostrar_busca,
             window.mostrar_produtos,
             window.mostrar_ofertas,
             window.mostrar_alertas,
             window.mostrar_links_afiliados,
+            window.mostrar_pendencias,
+            window.mostrar_crescimento,
             window.mostrar_grupos,
             window.mostrar_monitor,
             window.mostrar_historico,
             window.mostrar_configuracoes,
+            # Repete as telas mais pesadas para validar o cache de navegação.
+            window.mostrar_central_categorias,
+            window.mostrar_ofertas_do_dia,
         )
 
         try:

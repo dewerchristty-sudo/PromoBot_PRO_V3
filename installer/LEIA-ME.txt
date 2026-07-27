@@ -1,0 +1,21 @@
+PROMOBOT PRO V3 - INSTALAÇÃO EM OUTRO COMPUTADOR
+
+1. Copie apenas o arquivo Instalar_PromoBot_PRO_V3.exe.
+2. Execute o instalador e siga as telas.
+3. Para usar o WhatsApp local, instale também o Docker Desktop.
+4. Abra o PromoBot e configure telefones, grupos e canais na tela Configurações.
+
+O instalador:
+- cria atalhos no menu Iniciar e na área de trabalho;
+- cria um banco novo no computador de destino;
+- gera uma chave exclusiva para a Evolution API;
+- configura o supervisor para funcionar em segundo plano;
+- pode ser removido em Configurações > Aplicativos do Windows.
+
+IMPORTANTE
+- O banco e as credenciais do computador original não são distribuídos.
+- O instalador ainda não possui certificado comercial de assinatura de código.
+  Por isso, o Windows SmartScreen pode exibir um aviso no primeiro uso.
+
+SHA-256 desta compilação:
+7AF1C11FD6E7ED5A0B09C023459F1D0DDF76BC442684D700D9361E47DCF4EAC1

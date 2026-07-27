@@ -137,7 +137,16 @@ class GroupsPage(ctk.CTkFrame):
         messagebox.showinfo("Categorias", "Palavras-chave salvas e classificação atualizada.")
 
     def load_products(self):
-        products = self.database.listar_produtos()[:300]
+        products = self.database.listar_produtos()
+        # Produtos com link oficial salvo devem aparecer primeiro. Isso evita
+        # que ofertas antigas, mas prontas para publicar, fiquem inacessiveis
+        # quando o banco possui centenas ou milhares de produtos.
+        products.sort(
+            key=lambda product: (
+                not self.notifier.has_affiliate_link(product),
+                -int(product["id"]),
+            )
+        )
         self.products_by_label = {
             f"#{p['id']} | {p['loja']} | {p['titulo'][:90]}": p for p in products
         }
@@ -152,7 +161,7 @@ class GroupsPage(ctk.CTkFrame):
         category = self.notifier.whatsapp_category(product)
         groups = self.notifier.whatsapp_recipients_for_alert(product)
         quality, stale, low = self.notifier.partition_offer_quality([product])
-        affiliate, blocked = self.notifier.partition_affiliate_ready(quality)
+        affiliate_valid = self.notifier.has_affiliate_link(product)
         image_ok = str(product["imagem"] or "").startswith("http")
         duplicate = self.database.produto_ja_notificado(
             product["link"], product["loja"], product["titulo"]
@@ -163,7 +172,11 @@ class GroupsPage(ctk.CTkFrame):
             ("Imagem", "válida" if image_ok else "inválida", image_ok),
             ("Validade", "válida" if not stale else "vencida", not stale),
             ("Desconto", "aprovado" if not low else "insuficiente", not low),
-            ("Link afiliado", "validado" if affiliate else "pendente", not blocked),
+            (
+                "Link afiliado",
+                "validado" if affiliate_valid else "pendente",
+                affiliate_valid,
+            ),
             ("Repetição", "já notificado" if duplicate else "novo", not duplicate),
         ]
         approved = all(item[2] for item in checks)

@@ -5,15 +5,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.core.browser_manager import BrowserManager
-from src.stores import Americanas
 from src.stores import Amazon
-from src.stores import CasasBahia
-from src.stores import Kabum
-from src.stores import Magalu
 from src.stores import MercadoLivre
-from src.stores import Pichau
 from src.stores import Shopee
-from src.stores import Terabyte
 
 
 def main():
@@ -22,12 +16,6 @@ def main():
     stores = [
         MercadoLivre,
         Amazon,
-        Kabum,
-        Terabyte,
-        Pichau,
-        Magalu,
-        CasasBahia,
-        Americanas,
         Shopee,
     ]
 

@@ -19,15 +19,29 @@ foreach ($FileName in @(".env", "promobot.db")) {
     }
 }
 
+$DockerEnv = Join-Path $DistDir "docker\evolution\.env"
+if (Test-Path $DockerEnv) {
+    Copy-Item $DockerEnv (Join-Path $BackupDir "docker-evolution.env") -Force
+}
+
 python -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "Falha ao instalar dependencias." }
 
-$env:PLAYWRIGHT_BROWSERS_PATH = "0"
 python -m playwright install chromium
 if ($LASTEXITCODE -ne 0) { throw "Falha ao instalar browsers do Playwright." }
 
 python -m PyInstaller PromoBot_PRO_V3.spec --clean --noconfirm
 if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar executavel." }
+
+$DockerDistDir = Join-Path $DistDir "docker\evolution"
+New-Item -ItemType Directory -Path $DockerDistDir -Force | Out-Null
+Copy-Item "docker\evolution\docker-compose.yml" $DockerDistDir -Force
+$DockerEnvBackup = Join-Path $BackupDir "docker-evolution.env"
+if (Test-Path $DockerEnvBackup) {
+    Copy-Item $DockerEnvBackup (Join-Path $DockerDistDir ".env") -Force
+} else {
+    Copy-Item "docker\evolution\.env" $DockerDistDir -Force
+}
 
 foreach ($FileName in @(".env", "promobot.db")) {
     $Backup = Join-Path $BackupDir $FileName

@@ -1,5 +1,6 @@
 import threading
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,9 +8,18 @@ from pathlib import Path
 from src.core.browser_manager import BrowserManager
 from src.core.notifier import Notifier
 from src.core.store_manager import StoreManager
+from src.database.offer_pipeline_repository import OfferPipelineRepository
+from src.offers.activation import OfferActivationFlags
+from src.offers.activation_control import OfferActivationManager
+from src.offers.auto_stop import OfferCanaryAutoStop
+from src.offers.canary import OfferCanaryController
+from src.stores.active import is_active_store
 
 
 class MonitorRunner:
+
+    MAX_MONITORS_PER_BATCH = 2
+    SCHEDULER_POLL_SECONDS = 60
 
     def __init__(self, database, progress_callback=None):
 
@@ -122,7 +132,7 @@ class MonitorRunner:
         while not self.stop_event.is_set():
 
             try:
-                self.run_once()
+                self.run_due_batch()
             except Exception as error:
                 self.health["last_error"] = str(error)
                 self.database.registrar_evento_sistema(
@@ -130,16 +140,58 @@ class MonitorRunner:
                 )
                 self.log(f"Erro no monitoramento: {error}")
 
-            monitoramentos = self.database.listar_monitoramentos(somente_ativos=True)
-            intervalo = min(
-                [item["intervalo_minutos"] for item in monitoramentos],
-                default=30
-            )
-
-            self.stop_event.wait(max(intervalo, 1) * 60)
+            self.stop_event.wait(self.SCHEDULER_POLL_SECONDS)
 
         self.running = False
         self.health["monitor"] = "parado"
+
+    def run_due_batch(self):
+
+        with self.execution_lock:
+            self.retry_notification_queue()
+            self.notify_pending_alerts()
+
+            monitoramentos = self.database.listar_monitoramentos(
+                somente_ativos=True
+            )
+            devidos = [
+                item for item in monitoramentos
+                if self.monitoramento_devido(item)
+            ]
+            devidos.sort(key=lambda item: (
+                item["ultima_execucao"] is not None,
+                item["ultima_execucao"] or "",
+                item["id"],
+            ))
+
+            total = 0
+            for monitoramento in devidos[:self.MAX_MONITORS_PER_BATCH]:
+                if self.stop_event.is_set():
+                    break
+                total += self.execute_monitoring(monitoramento)
+
+            self.notify_pending_alerts()
+            self.health["last_cycle"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
+            self.health["last_error"] = ""
+            return total
+
+    @staticmethod
+    def monitoramento_devido(monitoramento, agora=None):
+
+        ultima_execucao = monitoramento["ultima_execucao"]
+        if not ultima_execucao:
+            return True
+
+        try:
+            ultima = datetime.fromisoformat(str(ultima_execucao))
+        except (TypeError, ValueError):
+            return True
+
+        agora = agora or datetime.utcnow()
+        intervalo = max(int(monitoramento["intervalo_minutos"] or 1), 1)
+        return agora >= ultima + timedelta(minutes=intervalo)
 
     def supervise(self):
 
@@ -185,6 +237,7 @@ class MonitorRunner:
 
         result = dict(self.health)
         result["queue"] = self.database.total_fila_notificacoes()
+        result["review"] = self.database.total_pendencias_revisao()
         return result
 
     def active_stable_stores(self):
@@ -201,7 +254,7 @@ class MonitorRunner:
                 disabled = {}
 
         active = []
-        for name in StoreManager.stable_store_names():
+        for name in StoreManager.default_store_names():
             expiry = disabled.get(name)
             if not expiry:
                 active.append(name)
@@ -224,6 +277,7 @@ class MonitorRunner:
 
         termo = monitoramento["termo"]
         lojas = self.parse_stores(monitoramento["lojas"])
+        lojas = [loja for loja in lojas if is_active_store(loja)]
 
         if not lojas:
             lojas = self.active_stable_stores()
@@ -257,7 +311,7 @@ class MonitorRunner:
                 self.log("Nenhuma promocao nova para notificar.")
                 return
 
-            result = self.notifier.send_alerts(alerts, self.database)
+            result = self.send_automatic_alerts(alerts)
             if result.startswith("Falha ao enviar:"):
                 self.database.enfileirar_notificacoes(alerts, result)
             self.log(f"Notificacao automatica: {result}")
@@ -269,7 +323,7 @@ class MonitorRunner:
             return
         ids = [row["id"] for row, _alert in queued]
         alerts = [alert for _row, alert in queued]
-        result = self.notifier.send_alerts(alerts, self.database)
+        result = self.send_automatic_alerts(alerts)
         if result.startswith("Enviado por:"):
             self.database.remover_fila_notificacoes(ids)
             self.database.registrar_evento_sistema(
@@ -278,6 +332,53 @@ class MonitorRunner:
         elif result.startswith("Falha ao enviar:"):
             self.database.enfileirar_notificacoes(alerts, result)
         self.log(f"Recuperacao da fila: {result}")
+
+    def send_automatic_alerts(self, alerts):
+        """Ativação canary opcional; desligada mantém a chamada histórica."""
+
+        flags = OfferActivationFlags.from_environment()
+        legacy_send = lambda selected: self.notifier.send_alerts(
+            selected, self.database
+        )
+        if (
+            not flags.intelligent_scheduler_enabled
+            or flags.canary_percent <= 0
+        ):
+            return legacy_send(alerts)
+
+        repository = None
+        try:
+            repository = OfferPipelineRepository(
+                Path(os.getenv(
+                    "OFFER_SHADOW_DB_PATH", "offer_shadow.db"
+                ))
+            )
+            repository.migrate()
+            manager = OfferActivationManager(repository)
+            stop_reason = OfferCanaryAutoStop(repository).evaluate(flags)
+            if stop_reason:
+                manager.auto_stop(
+                    stop_reason, repository.canary_safety_metrics()
+                )
+                self.log(f"Auto-Stop Canary: {stop_reason}")
+                return legacy_send(alerts)
+            controller = OfferCanaryController(
+                repository,
+                flags,
+                auto_stop_callback=manager.auto_stop,
+            )
+            return controller.execute(alerts, legacy_send)
+        except Exception as error:
+            if flags.enable_rollback:
+                self.log(
+                    "Rollback automatico para scheduler legado: "
+                    f"{type(error).__name__}: {error}"
+                )
+                return legacy_send(alerts)
+            return f"Falha ao enviar: ativacao inteligente: {error}"
+        finally:
+            if repository is not None:
+                repository.close()
 
     def notify_pending_async(self):
 

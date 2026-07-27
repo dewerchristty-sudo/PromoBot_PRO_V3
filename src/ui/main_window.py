@@ -14,6 +14,11 @@ from src.ui.search_page import SearchPage
 from src.ui.products_page import ProductsPage
 from src.ui.settings_page import SettingsPage
 from src.ui.groups_page import GroupsPage
+from src.ui.review_page import ReviewPage
+from src.ui.growth_page import GrowthPage
+from src.ui.category_hub_page import CategoryHubPage
+from src.ui.daily_deals_page import DailyDealsPage
+from src.ui.offer_dashboard import OfferDashboard
 
 
 class MainWindow(ctk.CTk):
@@ -24,6 +29,8 @@ class MainWindow(ctk.CTk):
         self.database = database
         self.background_workers = set()
         self.background_workers_lock = threading.Lock()
+        self.pages = {}
+        self.current_page = None
         self.shutdown_clean = None
         self.monitor_runner = MonitorRunner(database, self.log_monitor_status)
         self.monitor_runner.start_supervisor()
@@ -70,6 +77,12 @@ class MainWindow(ctk.CTk):
 
             ("Dashboard", self.mostrar_dashboard),
 
+            ("Inteligencia", self.mostrar_inteligencia),
+
+            ("Central Categorias", self.mostrar_central_categorias),
+
+            ("Ofertas do Dia", self.mostrar_ofertas_do_dia),
+
             ("Buscar", self.mostrar_busca),
 
             ("Produtos", self.mostrar_produtos),
@@ -79,6 +92,10 @@ class MainWindow(ctk.CTk):
             ("Alertas", self.mostrar_alertas),
 
             ("Links Afiliados", self.mostrar_links_afiliados),
+
+            ("Pendencias", self.mostrar_pendencias),
+
+            ("Crescimento", self.mostrar_crescimento),
 
             ("Grupos & Categorias", self.mostrar_grupos),
 
@@ -96,9 +113,9 @@ class MainWindow(ctk.CTk):
                 self.menu,
                 text=texto,
                 width=180,
-                height=40,
+                height=34,
                 command=comando
-            ).pack(pady=6)
+            ).pack(pady=3)
 
         self.area = ctk.CTkFrame(self)
 
@@ -129,174 +146,168 @@ class MainWindow(ctk.CTk):
     def limpar(self):
 
         for widget in self.area.winfo_children():
-            widget.destroy()
+            widget.pack_forget()
+
+    def mostrar_pagina(self, key, factory, status_text):
+
+        if self.current_page == key:
+            return self.pages.get(key)
+
+        self.status.configure(text=f"Abrindo {status_text}...")
+        self.update_idletasks()
+        self.limpar()
+
+        page = self.pages.get(key)
+        if page is None or not page.winfo_exists():
+            page = factory()
+            self.pages[key] = page
+
+        page.pack(fill="both", expand=True)
+        page.tkraise()
+        self.current_page = key
+        self.status.configure(text=status_text)
+        return page
 
     # ===============================================
 
     def mostrar_dashboard(self):
 
-        self.limpar()
-
-        dashboard = Dashboard(self.area, self.database, self.monitor_runner)
-
-        dashboard.pack(
-            fill="both",
-            expand=True
+        self.mostrar_pagina(
+            "dashboard",
+            lambda: Dashboard(self.area, self.database, self.monitor_runner),
+            "Dashboard",
         )
 
-        self.status.configure(
-            text="Dashboard"
+    def mostrar_inteligencia(self):
+
+        self.mostrar_pagina(
+            "inteligencia",
+            lambda: OfferDashboard(self.area),
+            "Inteligência de ofertas — modo sombra",
         )
 
     # ===============================================
 
     def mostrar_busca(self):
 
-        self.limpar()
-
-        SearchPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
+        self.mostrar_pagina(
+            "busca",
+            lambda: SearchPage(self.area, self.database),
+            "Busca",
         )
 
-        self.status.configure(
-            text="Busca"
+    def mostrar_central_categorias(self):
+
+        self.mostrar_pagina(
+            "central_categorias",
+            lambda: CategoryHubPage(self.area, self.database),
+            "Central de Categorias",
+        )
+
+    def mostrar_ofertas_do_dia(self):
+
+        self.mostrar_pagina(
+            "ofertas_dia",
+            lambda: DailyDealsPage(
+                self.area, self.database, self.monitor_runner
+            ),
+            "Ofertas do Dia e Promocoes",
         )
 
     # ===============================================
 
     def mostrar_produtos(self):
 
-        self.limpar()
-
-        ProductsPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
-        )
-
-        self.status.configure(
-            text=f"Produtos cadastrados: {self.database.total_produtos()}"
+        self.mostrar_pagina(
+            "produtos",
+            lambda: ProductsPage(self.area, self.database),
+            f"Produtos cadastrados: {self.database.total_produtos()}",
         )
 
     # ===============================================
 
     def mostrar_historico(self):
 
-        self.limpar()
-
-        HistoryPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
-        )
-
-        self.status.configure(
-            text="Historico"
+        self.mostrar_pagina(
+            "historico",
+            lambda: HistoryPage(self.area, self.database),
+            "Historico",
         )
 
     # ===============================================
 
     def mostrar_alertas(self):
 
-        self.limpar()
-
-        AlertsPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
-        )
-
-        self.status.configure(
-            text="Alertas"
+        self.mostrar_pagina(
+            "alertas",
+            lambda: AlertsPage(self.area, self.database),
+            "Alertas",
         )
 
     # ===============================================
 
     def mostrar_monitor(self):
 
-        self.limpar()
-
-        MonitorPage(
-            self.area,
-            self.database,
-            self.monitor_runner
-        ).pack(
-            fill="both",
-            expand=True
-        )
-
-        self.status.configure(
-            text="Monitoramento"
+        self.mostrar_pagina(
+            "monitor",
+            lambda: MonitorPage(
+                self.area, self.database, self.monitor_runner
+            ),
+            "Monitoramento",
         )
 
     # ===============================================
 
     def mostrar_links_afiliados(self):
 
-        self.limpar()
-
-        AffiliateLinksPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
-        )
-
-        self.status.configure(
-            text="Links de afiliado pendentes"
+        self.mostrar_pagina(
+            "links_afiliados",
+            lambda: AffiliateLinksPage(self.area, self.database),
+            "Links de afiliado pendentes",
         )
 
     # ===============================================
 
     def mostrar_ofertas(self):
 
-        self.limpar()
-
-        OffersPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
+        self.mostrar_pagina(
+            "ofertas",
+            lambda: OffersPage(self.area, self.database),
+            "Ofertas",
         )
 
-        self.status.configure(
-            text="Ofertas"
+    def mostrar_pendencias(self):
+
+        self.mostrar_pagina(
+            "pendencias",
+            lambda: ReviewPage(self.area, self.database),
+            f"Pendencias para revisao: {self.database.total_pendencias_revisao()}",
         )
 
     def mostrar_grupos(self):
 
-        self.limpar()
-        GroupsPage(self.area, self.database).pack(fill="both", expand=True)
-        self.status.configure(text="Grupos, categorias e relatórios")
+        self.mostrar_pagina(
+            "grupos",
+            lambda: GroupsPage(self.area, self.database),
+            "Grupos, categorias e relatorios",
+        )
+
+    def mostrar_crescimento(self):
+
+        self.mostrar_pagina(
+            "crescimento",
+            lambda: GrowthPage(self.area, self.database),
+            "Plano de crescimento e oferta do dia",
+        )
 
     # ===============================================
 
     def mostrar_configuracoes(self):
 
-        self.limpar()
-
-        SettingsPage(
-            self.area,
-            self.database
-        ).pack(
-            fill="both",
-            expand=True
-        )
-
-        self.status.configure(
-            text="Configuracoes"
+        self.mostrar_pagina(
+            "configuracoes",
+            lambda: SettingsPage(self.area, self.database),
+            "Configuracoes",
         )
 
     # ===============================================

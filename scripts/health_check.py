@@ -20,7 +20,12 @@ def main():
 
     print(f"Health check: {termo}\n")
 
-    for loja in StoreManager.stable_store_names():
+    lojas = list(dict.fromkeys(
+        StoreManager.default_store_names()
+        + StoreManager.stable_store_names()
+    ))
+
+    for loja in lojas:
 
         manager = StoreManager(enabled_stores=[loja])
 

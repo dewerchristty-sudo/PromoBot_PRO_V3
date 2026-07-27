@@ -1,4 +1,5 @@
 import customtkinter as ctk
+from src.core.store_manager import StoreManager
 
 
 class Dashboard(ctk.CTkFrame):
@@ -62,12 +63,12 @@ class Dashboard(ctk.CTkFrame):
 
     def atualizar(self):
 
-        produtos = self.database.total_produtos()
-        lojas = self.database.total_lojas()
-        promocoes = self.database.total_promocoes()
+        produtos = self.database.total_produtos_ativos()
+        lojas = len(StoreManager.default_store_names())
+        promocoes = self.database.total_promocoes_ativas()
         coletas = self.database.total_coletas_preco()
-        menor_preco = self.database.menor_preco()
-        recentes = self.database.listar_recentes(5)
+        menor_preco = self.database.menor_preco_ativo()
+        recentes = self.database.listar_recentes_ativos(5)
 
         self.lbl_produtos.configure(text=str(produtos))
         self.lbl_lojas.configure(text=str(lojas))
@@ -123,7 +124,8 @@ class Dashboard(ctk.CTkFrame):
             else:
                 icon, status = "🟡", f"Monitor: {health['monitor']}"
             self.health_label.configure(
-                text=(f"{icon} {status} | Fila de recuperação: {health['queue']} | "
+                text=(f"{icon} {status} | Recuperação: {health['queue']} | "
+                      f"Revisão: {health['review']} | "
                       f"Último ciclo: {health['last_cycle'] or 'aguardando'}")
             )
         self.after(5000, self.update_health)

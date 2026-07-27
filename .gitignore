@@ -14,3 +14,6 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+data/browser_profiles/
+data/affiliate_links_cache.db
+browser_profiles/

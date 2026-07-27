@@ -5,9 +5,7 @@ resultados em SQLite e exportar a lista para CSV.
 
 ## Funcionalidades
 
-- Busca principal em Mercado Livre e Shopee.
-- Lojas opcionais/experimentais: Amazon, Kabum, Terabyte, Americanas, Pichau,
-  Magalu e Casas Bahia.
+- Busca exclusiva em Mercado Livre, Amazon e Shopee.
 - Salvamento automatico dos produtos encontrados em `promobot.db`.
 - Dashboard com total de produtos, lojas e itens recentes.
 - Tela de produtos com filtro, atualizacao, exportacao CSV e limpeza do banco.
@@ -18,7 +16,7 @@ resultados em SQLite e exportar a lista para CSV.
 - Notificacoes por Telegram e WhatsApp via webhook/API.
 - Roteamento do WhatsApp para seis grupos por categoria.
 - Modo de teste controlado, com confirmacao manual e identificacao na mensagem.
-- Links afiliados oficiais de Mercado Livre e Shopee salvos no banco.
+- Links afiliados oficiais de Amazon, Mercado Livre e Shopee salvos no banco.
 - Monitoramento automatico por termo e intervalo em minutos.
 - Historico com resumo por loja e ultimos produtos salvos.
 - Configuracao de tema da interface.
@@ -107,11 +105,21 @@ Os envios automaticos respeitam `NOTIFICATION_START_HOUR` e
 `NOTIFICATION_END_HOUR`. O modo de teste controlado fica na tela
 `Grupos & Categorias`, exige confirmacao manual e nao altera essa protecao.
 
+Para ofertas da Amazon, pesquise ou monitore o produto normalmente. Depois abra
+`Links Afiliados`, selecione o produto Amazon, cole o link criado no SiteStripe
+(`amzn.to` ou `amazon.com.br`), teste o destino e use `Salvar e notificar agora`.
+O PromoBot bloqueia o envio enquanto o link oficial de afiliado nao estiver
+salvo, evitando publicar acidentalmente um link sem a sua identificacao.
+
 Depois de instalar o Docker Desktop, inicie a Evolution API local com:
 
 ```powershell
 .\scripts\start_evolution.ps1
 ```
+
+Também é possível fazer tudo pela tela `Configurações` do PromoBot: use os
+botões para abrir o Docker Desktop, iniciar a Evolution API, exibir o QR Code,
+verificar a conexão do WhatsApp ou parar os serviços.
 
 Para parar:
 
@@ -135,7 +143,6 @@ Os scripts em `scripts/` abrem o navegador para conferir seletores e diagnostica
 mudancas nas paginas das lojas:
 
 ```powershell
-python scripts\inspect_kabum.py
 python scripts\inspect_shopee.py
 python scripts\validate_search.py "ssd 1tb"
 python scripts\health_check.py "ssd 1tb"
@@ -166,12 +173,8 @@ geladeira, fone bluetooth, monitor gamer, placa de video e outros.
 
 Validacao real feita com `ssd 1tb`:
 
-- Mercado Livre: retornando resultados.
+- Mercado Livre: pode exigir verificacao de conta; o bot nao substitui uma
+  busca bloqueada por ofertas genericas sem relacao com o termo e nao o usa
+  no monitoramento estavel enquanto a verificacao externa estiver ativa.
+- Shopee: retornando resultados e incluida no monitoramento estavel.
 - Amazon: retornando resultados.
-- Kabum: retornando resultados.
-- Terabyte: integrada para busca em hardware e promocoes gamer.
-- Americanas: retornando resultados.
-- Pichau: retornou manutencao/bloqueio temporario.
-- Magalu: retornou erro 403.
-- Casas Bahia: pagina abriu, mas retornou nenhum produto para os termos testados.
-- Shopee: a pagina/API retornou bloqueio ou HTML vazio no ambiente de teste.

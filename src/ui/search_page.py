@@ -10,24 +10,40 @@ from src.scraper import Parser
 
 class SearchPage(ctk.CTkFrame):
 
-    def __init__(self, master, database):
+    def __init__(
+        self, master, database, initial_query="", category="", result_callback=None
+    ):
         super().__init__(master)
 
         self.database = database
         self.worker = None
         self.window = self.winfo_toplevel()
         self.ui_queue = Queue()
+        self.category = category
+        self.result_callback = result_callback
 
         self.lojas = {}
 
-        for nome in StoreManager.stable_store_names():
-            self.lojas[nome] = tk.BooleanVar(value=True)
-
-        for nome in StoreManager.experimental_store_names():
-            self.lojas[nome] = tk.BooleanVar(value=False)
+        lojas_padrao = set(StoreManager.default_store_names())
+        for nome in (
+            StoreManager.stable_store_names()
+            + StoreManager.experimental_store_names()
+        ):
+            self.lojas[nome] = tk.BooleanVar(value=nome in lojas_padrao)
 
         self.criar_interface()
+        if initial_query:
+            self.entry.insert(0, str(initial_query))
         self.after(50, self.process_ui_queue)
+
+    def set_query(self, query):
+
+        self.entry.delete(0, "end")
+        self.entry.insert(0, str(query or ""))
+
+    def set_category(self, category):
+
+        self.category = str(category or "")
 
     def criar_interface(self):
 
@@ -76,7 +92,12 @@ class SearchPage(ctk.CTkFrame):
             ctk.CTkCheckBox(
                 lojas_frame,
                 text=nome,
-                variable=variavel
+                variable=variavel,
+                state=(
+                    "disabled"
+                    if nome in StoreManager.default_store_names()
+                    else "normal"
+                )
             ).pack(side="left", padx=(0, 12), pady=10)
 
         self.status = ctk.CTkLabel(
@@ -177,9 +198,13 @@ class SearchPage(ctk.CTkFrame):
             )
 
             resultados = store_manager.search_all(produto)
+            for resultado in resultados:
+                resultado["categoria_manual"] = self.category
             self.database.salvar_lista(resultados)
 
-            self.dispatch_ui(lambda: self.mostrar_resultados(resultados))
+            self.dispatch_ui(
+                lambda: self.mostrar_resultados_e_notificar(resultados)
+            )
 
         except Exception as erro:
 
@@ -204,6 +229,12 @@ class SearchPage(ctk.CTkFrame):
 
         self.status.configure(text="A busca falhou.")
         self.escrever(mensagem)
+
+    def mostrar_resultados_e_notificar(self, resultados):
+
+        self.mostrar_resultados(resultados)
+        if self.result_callback:
+            self.result_callback(resultados)
 
     # =======================================
 

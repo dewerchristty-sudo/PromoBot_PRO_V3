@@ -1,4 +1,5 @@
 import threading
+import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
@@ -16,6 +17,14 @@ class MonitorPage(ctk.CTkFrame):
         self.runner = runner or MonitorRunner(database)
         self.previous_progress_callback = self.runner.progress_callback
         self.runner.set_progress_callback(self.log_threadsafe)
+        self.lojas = {}
+
+        lojas_padrao = set(StoreManager.default_store_names())
+        for nome in (
+            StoreManager.stable_store_names()
+            + StoreManager.experimental_store_names()
+        ):
+            self.lojas[nome] = tk.BooleanVar(value=nome in lojas_padrao)
 
         self.criar_interface()
         self.carregar()
@@ -60,6 +69,28 @@ class MonitorPage(ctk.CTkFrame):
             width=110,
             command=self.adicionar
         ).grid(row=0, column=2, padx=(0, 10), pady=10)
+
+        lojas_frame = ctk.CTkFrame(form, fg_color="transparent")
+        lojas_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 10))
+
+        ctk.CTkLabel(
+            lojas_frame,
+            text="Lojas:",
+            font=("Arial", 13, "bold")
+        ).pack(side="left", padx=(0, 10))
+
+        for nome, variavel in self.lojas.items():
+            ctk.CTkCheckBox(
+                lojas_frame,
+                text=nome,
+                variable=variavel,
+                state=(
+                    "disabled"
+                    if nome in StoreManager.default_store_names()
+                    else "normal"
+                ),
+                width=0,
+            ).pack(side="left", padx=(0, 12))
 
         botoes = ctk.CTkFrame(self)
         botoes.pack(fill="x", padx=20, pady=(10, 0))
@@ -124,11 +155,20 @@ class MonitorPage(ctk.CTkFrame):
 
     def adicionar(self):
 
+        lojas_selecionadas = self.lojas_selecionadas()
+
+        if not lojas_selecionadas:
+            messagebox.showerror(
+                "Nenhuma loja",
+                "Selecione ao menos uma loja para o monitoramento."
+            )
+            return
+
         try:
             self.database.criar_monitoramento(
                 self.termo.get(),
                 self.intervalo.get(),
-                ",".join(StoreManager.stable_store_names())
+                ",".join(lojas_selecionadas)
             )
         except ValueError:
             messagebox.showerror(
@@ -147,7 +187,8 @@ class MonitorPage(ctk.CTkFrame):
 
     def parar(self):
 
-        self.runner.stop()
+        # Nao bloqueia a interface enquanto a loja atual encerra a busca.
+        self.runner.stop(wait=False)
         self.carregar()
 
     def executar_agora(self):
@@ -161,10 +202,19 @@ class MonitorPage(ctk.CTkFrame):
 
     def adicionar_padrao(self):
 
+        lojas_selecionadas = self.lojas_selecionadas()
+
+        if not lojas_selecionadas:
+            messagebox.showerror(
+                "Nenhuma loja",
+                "Selecione ao menos uma loja para as categorias padrao."
+            )
+            return
+
         try:
             criados = self.database.criar_monitoramentos_padrao(
                 self.intervalo.get(),
-                ",".join(StoreManager.stable_store_names())
+                ",".join(lojas_selecionadas)
             )
         except ValueError:
             messagebox.showerror(
@@ -178,6 +228,13 @@ class MonitorPage(ctk.CTkFrame):
             f"{criados} novo(s) monitoramento(s) criado(s)."
         )
         self.carregar()
+
+    def lojas_selecionadas(self):
+
+        return [
+            nome for nome, variavel in self.lojas.items()
+            if variavel.get()
+        ]
 
     def _executar_agora_thread(self):
 

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
@@ -20,7 +21,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=browser_data,
+    # CustomTkinter carrega temas, fontes e icones em tempo de execucao.
+    # Esses arquivos nao entram apenas com hiddenimports.
+    datas=browser_data + collect_data_files("customtkinter"),
     hiddenimports=[
         'customtkinter',
         'PIL',
@@ -37,6 +40,18 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# O hook oficial do Playwright coleta tambem .local-browsers. O PromoBot usa
+# exclusivamente o Chromium portatil em _internal/ms-playwright, configurado
+# por src/runtime_playwright.py; manter os dois adicionava cerca de 688 MB.
+a.datas = [
+    item for item in a.datas
+    if ".local-browsers" not in str(item[0]).replace("\\", "/")
+]
+a.binaries = [
+    item for item in a.binaries
+    if ".local-browsers" not in str(item[0]).replace("\\", "/")
+]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

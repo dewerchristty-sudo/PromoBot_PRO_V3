@@ -3,20 +3,61 @@ import random
 import re
 import time
 import logging
+import sys
+import unicodedata
+from io import BytesIO
 from datetime import datetime
 from datetime import timezone
-from urllib.parse import quote
+from pathlib import Path
+from urllib.parse import quote, urlparse
 from typing import Any, Optional
 
 import requests
 from dotenv import load_dotenv
+from PIL import Image, ImageOps, UnidentifiedImageError
+from src.stores.active import is_active_store
 
 logger = logging.getLogger(__name__)
 
 
 class Notifier:
 
-    ALWAYS_DISABLED_NOTIFICATION_STORES = {"amazon"}
+    ALWAYS_DISABLED_NOTIFICATION_STORES = set()
+    MAX_MANUAL_IMAGE_BYTES = 15 * 1024 * 1024
+    MIN_MANUAL_IMAGE_WIDTH = 500
+    MIN_MANUAL_IMAGE_HEIGHT = 500
+
+    @staticmethod
+    def evolution_diagnostic_logger():
+
+        runtime_root = (
+            Path(sys.executable).resolve().parent
+            if getattr(sys, "frozen", False)
+            else Path(__file__).resolve().parents[2]
+        )
+        log_dir = runtime_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_logger = logging.getLogger(
+            "promobot.evolution_api_diagnostic"
+        )
+        diagnostic_logger.setLevel(logging.WARNING)
+        diagnostic_logger.propagate = False
+        log_path = (log_dir / "evolution_api_diagnostic.log").resolve()
+        has_target_handler = any(
+            isinstance(handler, logging.FileHandler)
+            and Path(handler.baseFilename).resolve() == log_path
+            for handler in diagnostic_logger.handlers
+        )
+        if not has_target_handler:
+            handler = logging.FileHandler(
+                log_path,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s %(message)s"
+            ))
+            diagnostic_logger.addHandler(handler)
+        return diagnostic_logger
 
     WHATSAPP_CATEGORY_KEYWORDS = {
         "mamae_bebe": (
@@ -37,12 +78,14 @@ class Notifier:
             "computador", "monitor", "smartwatch", "fone", "headset",
             "caixa de som", "videogame", "playstation", "xbox", "nintendo",
             "carregador", "cabo usb", "camera", "câmera", "roteador", "ssd",
-            "memoria ram", "memória ram", "teclado", "mouse",
+            "memoria ram", "memória ram", "teclado", "mouse", "smart tv",
+            "mini tv", "tv portatil", "televisao", "televisão", "televisor",
         ),
         "beleza_perfumaria": (
             "perfume", "perfumaria", "body splash", "maquiagem", "batom",
             "hidratante", "protetor solar", "shampoo", "condicionador",
-            "mascara capilar", "máscara capilar", "secador", "chapinha",
+            "mascara capilar", "mascara de tratamento", "máscara capilar",
+            "secador", "chapinha",
             "modelador", "barbeador", "desodorante", "skincare", "cosmetico",
             "cosmético",
         ),
@@ -93,12 +136,25 @@ class Notifier:
 
         return channels
 
-    def send_alerts(self, alerts, database=None):
+    def send_alerts(
+        self,
+        alerts,
+        database=None,
+        enforce_offer_quality=True,
+        ignore_notification_hours=False,
+    ):
 
+        alerts = [
+            alert for alert in alerts or ()
+            if is_active_store(self.value(alert, "loja", "store"))
+        ]
         if not alerts:
             return "Nenhum alerta disparado."
 
-        if not self.within_notification_hours():
+        if (
+            not ignore_notification_hours
+            and not self.within_notification_hours()
+        ):
             return "Nenhum envio: fora do horario permitido (08h as 22h)."
 
         database = database or self.database
@@ -107,20 +163,48 @@ class Notifier:
             self.database = database
 
         enabled_alerts, disabled_alerts = self.partition_enabled_stores(alerts)
-        quality_alerts, stale_alerts, low_discount_alerts = (
-            self.partition_offer_quality(enabled_alerts)
-        )
+        if enforce_offer_quality:
+            quality_alerts, stale_alerts, low_discount_alerts = (
+                self.partition_offer_quality(enabled_alerts)
+            )
+        else:
+            quality_alerts = list(enabled_alerts)
+            stale_alerts = []
+            low_discount_alerts = []
         ready_alerts, blocked_alerts = self.partition_affiliate_ready(
             quality_alerts
         )
-        telegram_alerts = list(ready_alerts)
-        whatsapp_alerts, unrouted_alerts = self.partition_whatsapp_routable(
+        image_alerts, image_blocked_alerts = self.partition_image_ready(
             ready_alerts
+        )
+        telegram_alerts = list(image_alerts)
+        whatsapp_alerts, unrouted_alerts = self.partition_whatsapp_routable(
+            image_alerts
+        )
+        # A vaga horaria deve ficar com a melhor oportunidade, e nao apenas
+        # com o primeiro produto que chegou da coleta.
+        whatsapp_alerts = sorted(
+            whatsapp_alerts,
+            key=self.offer_priority_key,
         )
         whatsapp_alerts, rate_limited_alerts = self.apply_hourly_limit(
             whatsapp_alerts,
             database,
         )
+
+        self.record_review_pendencies(
+            database,
+            disabled_alerts=disabled_alerts,
+            stale_alerts=stale_alerts,
+            low_discount_alerts=low_discount_alerts,
+            affiliate_pending=blocked_alerts,
+            image_pending=image_blocked_alerts,
+            unrouted_alerts=unrouted_alerts,
+        )
+        if rate_limited_alerts and database is not None:
+            enqueue = getattr(database, "enfileirar_notificacoes", None)
+            if enqueue:
+                enqueue(rate_limited_alerts, "Limite horario; nova tentativa automatica.")
 
         if not telegram_alerts and not whatsapp_alerts:
             return "Nenhum envio: " + self.skipped_summary(
@@ -130,6 +214,7 @@ class Notifier:
                 blocked_alerts,
                 rate_limited_alerts,
                 unrouted_alerts,
+                image_blocked_alerts,
             )
 
         sent = []
@@ -163,6 +248,12 @@ class Notifier:
 
         if sent:
             if database is not None:
+                resolver = getattr(database, "resolver_pendencias_por_chaves", None)
+                if resolver:
+                    resolver([
+                        self.value(alert, "link", "") or ""
+                        for alert in delivered_alerts
+                    ])
                 alerts_with_id = [
                     alert
                     for alert in delivered_alerts
@@ -174,6 +265,8 @@ class Notifier:
             result = "Enviado por: " + ", ".join(sent)
             if blocked_alerts:
                 result += f" | {len(blocked_alerts)} aguardando link afiliado"
+            if image_blocked_alerts:
+                result += f" | {len(image_blocked_alerts)} sem imagem valida"
             if disabled_alerts:
                 result += f" | {len(disabled_alerts)} de lojas desabilitadas"
             if stale_alerts:
@@ -199,6 +292,7 @@ class Notifier:
             blocked_alerts,
             rate_limited_alerts,
             unrouted_alerts,
+            image_blocked_alerts,
         )):
             return "Nenhum envio: " + self.skipped_summary(
                 disabled_alerts,
@@ -207,12 +301,30 @@ class Notifier:
                 blocked_alerts,
                 rate_limited_alerts,
                 unrouted_alerts,
+                image_blocked_alerts,
             )
 
         return "Configure WhatsApp no arquivo .env."
 
+    def send_manual_alerts(
+        self,
+        alerts,
+        database=None,
+        ignore_notification_hours=False,
+    ):
+        """Envia apos confirmacao humana, sem o filtro automatico de qualidade."""
+
+        return self.send_alerts(
+            alerts,
+            database=database,
+            enforce_offer_quality=False,
+            ignore_notification_hours=ignore_notification_hours,
+        )
+
     def send_test_alert(self, item):
 
+        if not is_active_store(self.value(item, "loja", "store")):
+            return "Falha no teste: loja inativa."
         if self.database is None:
             return "Falha no teste: banco de dados indisponivel."
 
@@ -254,6 +366,43 @@ class Notifier:
 
         return "Teste enviado por WhatsApp para 1 grupo."
 
+    def send_review_alert(self, item):
+        """Envia manualmente ao grupo privado, sem consumir o limite dos grupos."""
+
+        if not is_active_store(self.value(item, "loja", "store")):
+            return "Falha: loja inativa."
+        recipient = os.getenv("WHATSAPP_REVIEW_GROUP", "").strip()
+        if not recipient.endswith("@g.us"):
+            return "Falha: grupo de revisao nao configurado."
+        if not self.whatsapp_configured():
+            return "Falha: WhatsApp nao configurado."
+        if not self.has_affiliate_link(item):
+            return "Falha: link afiliado oficial nao validado."
+
+        image = self.verified_whatsapp_image(item)
+        if not image.startswith("http"):
+            return "Falha: imagem do produto nao confirmada."
+
+        try:
+            self.send_whatsapp_message(self.format_alert(item), image, recipient)
+            if self.database is not None:
+                registrar = getattr(self.database, "registrar_envio", None)
+                if registrar:
+                    original_link = self.value(item, "link", "") or ""
+                    registrar(
+                        self.value(item, "loja", "") or "",
+                        self.value(item, "titulo", "") or "",
+                        original_link,
+                        self.affiliate_link(item),
+                        self.database.etiqueta_link_afiliado(original_link),
+                        "WhatsApp Revisao",
+                        recipient,
+                    )
+        except Exception as error:
+            return f"Falha no envio para revisao: {error}"
+
+        return "Oferta enviada para o grupo Revisao PromoBot."
+
     def partition_enabled_stores(self, alerts):
 
         disabled_names = {
@@ -293,6 +442,42 @@ class Notifier:
 
         return ready, stale, low_discount
 
+    def partition_image_ready(self, alerts):
+
+        ready = []
+        blocked = []
+        for alert in alerts:
+            image = str(self.value(alert, "imagem", "") or "").strip()
+            target = ready if image.startswith(("http://", "https://")) else blocked
+            target.append(alert)
+        return ready, blocked
+
+    def record_review_pendencies(
+        self,
+        database,
+        disabled_alerts=None,
+        stale_alerts=None,
+        low_discount_alerts=None,
+        affiliate_pending=None,
+        image_pending=None,
+        unrouted_alerts=None,
+    ):
+
+        register = getattr(database, "registrar_pendencias_revisao", None)
+        if not register:
+            return
+        groups = (
+            (disabled_alerts, "loja_desabilitada", "Loja desabilitada para envio."),
+            (stale_alerts, "oferta_vencida", "Oferta com mais de 24 horas; confirme antes de enviar."),
+            (low_discount_alerts, "desconto_insuficiente", "Desconto abaixo do minimo; confirme antes de enviar."),
+            (affiliate_pending, "link_afiliado", "Link afiliado oficial ainda nao foi validado."),
+            (image_pending, "imagem", "Produto sem imagem valida para a notificacao."),
+            (unrouted_alerts, "categoria", "Categoria ou grupo de destino nao identificado."),
+        )
+        for alerts, kind, reason in groups:
+            if alerts:
+                register(alerts, kind, reason)
+
     def offer_is_stale(self, item, max_age_hours):
 
         raw_date = str(self.value(item, "data", "") or "").strip()
@@ -312,7 +497,7 @@ class Notifier:
     def discount_percent(self, item):
 
         current_price = self.value(item, "preco_valor")
-        old_price = self.value(item, "maior_preco")
+        old_price = self.comparison_price(item)
 
         if not current_price or not old_price or old_price <= current_price:
             return 0.0
@@ -329,12 +514,21 @@ class Notifier:
             target = with_image if image.startswith("http") else without_image
             target.append(item)
 
-        with_image.sort(key=lambda item: (
-            -self.discount_percent(item),
-            self.value(item, "preco_valor", float("inf")) or float("inf"),
-        ))
+        with_image.sort(key=self.offer_priority_key)
 
         return with_image, without_image
+
+    def offer_priority_key(self, item):
+
+        current = self.price_number(self.value(item, "preco_valor"))
+        previous = self.comparison_price(item)
+        saving = max(previous - current, 0) if current > 0 else 0
+
+        return (
+            -self.discount_percent(item),
+            -saving,
+            current if current > 0 else float("inf"),
+        )
 
     def apply_hourly_limit(self, alerts, database):
 
@@ -356,6 +550,7 @@ class Notifier:
         affiliate_pending,
         rate_limited,
         unrouted=None,
+        image_pending=None,
     ):
 
         reasons = []
@@ -367,10 +562,21 @@ class Notifier:
             reasons.append(f"{len(low_discount)} abaixo do desconto minimo")
         if affiliate_pending:
             reasons.append(f"{len(affiliate_pending)} aguardando link afiliado")
+        if image_pending:
+            reasons.append(f"{len(image_pending)} sem imagem valida")
         if rate_limited:
             reasons.append(f"{len(rate_limited)} aguardando limite horario")
         if unrouted:
-            reasons.append(f"{len(unrouted)} sem categoria segura")
+            diagnostics = [
+                self.category_routing_diagnostic(item)
+                for item in unrouted
+            ]
+            technical = ", ".join(dict.fromkeys(
+                diagnostic["reason"] for diagnostic in diagnostics
+            ))
+            reasons.append(
+                f"{len(unrouted)} sem categoria segura ({technical})"
+            )
 
         return " | ".join(reasons) or "nenhum produto elegivel"
 
@@ -385,12 +591,12 @@ class Notifier:
             target.append(alert)
         return ready, unrouted
 
-    def float_env(self, name):
+    def float_env(self, name, default=0):
 
         try:
-            return float(os.getenv(name, "0") or 0)
+            return float(os.getenv(name, str(default)) or default)
         except ValueError:
-            return 0.0
+            return float(default)
 
     def within_notification_hours(self):
 
@@ -424,10 +630,18 @@ class Notifier:
 
             for channel in channels:
                 destinations = (
-                    self.whatsapp_recipients_for_alert(alert)
+                    (
+                        self.whatsapp_recipients_for_alert(alert)
+                        + (
+                            self.personal_alert_phones()
+                            if self.is_unmissable_offer(alert)
+                            else []
+                        )
+                    )
                     if channel == "WhatsApp"
                     else [os.getenv("TELEGRAM_CHAT_ID", "")]
                 )
+                destinations = list(dict.fromkeys(destinations))
                 for destination in destinations:
                     database.registrar_envio(
                         self.value(alert, "loja", "") or "",
@@ -458,7 +672,7 @@ class Notifier:
     def offer_price_lines(self, item):
 
         current_price = self.value(item, "preco_valor")
-        old_price = self.value(item, "maior_preco")
+        old_price = self.comparison_price(item)
         current_text = (
             self.format_money(current_price)
             if current_price is not None
@@ -491,6 +705,53 @@ class Notifier:
 
         return lines
 
+    def comparison_price(self, item):
+
+        candidates = (
+            self.value(item, "preco_antigo"),
+            self.value(item, "maior_preco"),
+        )
+
+        for candidate in candidates:
+            value = self.price_number(candidate)
+            if value > 0:
+                return value
+
+        if self.database is None:
+            return 0.0
+
+        loader = getattr(self.database, "maior_preco_historico", None)
+        if not callable(loader):
+            return 0.0
+
+        try:
+            value = loader(
+                self.value(item, "id"),
+                self.value(item, "link", "") or "",
+            )
+            return self.price_number(value)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def price_number(value):
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+
+        text = re.sub(r"[^\d,.-]", "", text)
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0
+
     def random_headline(self):
 
         if not self._headline_queue:
@@ -520,7 +781,7 @@ class Notifier:
         if self.is_shopee(item) and storefront and storefront != link:
             lines.extend([
                 "",
-                "Mais achadinhos da ViVi na Shopee:",
+                "Mais achadinhos da ViVi na vitrine da Shopee:",
                 storefront,
             ])
 
@@ -538,6 +799,10 @@ class Notifier:
     def affiliate_link(self, item):
 
         link = self.value(item, "link", "") or ""
+
+        saved_in_query = self.value(item, "link_afiliado_salvo", "")
+        if isinstance(saved_in_query, str) and saved_in_query.strip():
+            return saved_in_query.strip()
 
         if self.database is not None and self.requires_affiliate_link(item):
             saved_link = self.database.buscar_link_afiliado(link)
@@ -607,7 +872,11 @@ class Notifier:
 
     def requires_affiliate_link(self, item):
 
-        return self.is_shopee(item) or self.is_mercado_livre(item)
+        return (
+            self.is_shopee(item)
+            or self.is_mercado_livre(item)
+            or self.is_amazon(item)
+        )
 
     def has_affiliate_link(self, item):
 
@@ -665,6 +934,17 @@ class Notifier:
             or "produto.mercadolivre.com" in link
         )
 
+    def is_amazon(self, item):
+
+        loja = (self.value(item, "loja", "") or "").strip().lower()
+        link = (self.value(item, "link", "") or "").strip().lower()
+
+        return (
+            loja == "amazon"
+            or "amazon.com.br" in link
+            or "amzn.to" in link
+        )
+
     def mapped_affiliate_link(self, link, mapping):
 
         product_id = self.product_id(link)
@@ -716,7 +996,7 @@ class Notifier:
     def format_price_lines(self, item):
 
         current_price = self.value(item, "preco_valor")
-        old_price = self.value(item, "maior_preco")
+        old_price = self.comparison_price(item)
 
         if current_price is None:
             return [f"Preco de promocao: R$ {self.value(item, 'preco')}"]
@@ -737,7 +1017,10 @@ class Notifier:
 
     def format_money(self, value):
 
-        return f"R$ {value:.2f}".replace(".", ",")
+        formatted = f"{float(value):,.2f}".translate(
+            str.maketrans({",": ".", ".": ","})
+        )
+        return f"R$ {formatted}"
 
     def send_telegram_alerts(self, alerts):
 
@@ -775,9 +1058,23 @@ class Notifier:
             if index > 0:
                 self.wait_between_notifications()
 
-            imagem = (self.value(item, "imagem", "") or "").strip()
+            imagem_original = self.verified_whatsapp_image(item)
+            imagem_preparada = self.value(item, "imagem_whatsapp")
+            imagem = (
+                imagem_preparada
+                if self.evolution_configured() and imagem_preparada
+                else imagem_original
+            )
 
-            if not imagem.startswith("http"):
+            if not (
+                isinstance(imagem, (bytes, bytearray))
+                or str(imagem).startswith("http")
+            ):
+                logger.warning(
+                    "Envio bloqueado: nao foi possivel confirmar a imagem "
+                    "do produto %s.",
+                    self.value(item, "link", ""),
+                )
                 continue
 
             for recipient in self.whatsapp_recipients_for_alert(item):
@@ -786,7 +1083,294 @@ class Notifier:
                 self.send_whatsapp_message(self.format_alert(item), imagem, recipient)
                 enviados += 1
 
+            # A copia pessoal nao substitui o envio aos grupos. Ela e enviada
+            # somente quando o desconto passa pelos criterios de oportunidade
+            # excepcional configurados pelo usuario.
+            if self.is_unmissable_offer(item):
+                normal_recipients = set(self.whatsapp_recipients_for_alert(item))
+                for recipient in self.personal_alert_phones():
+                    if recipient in normal_recipients:
+                        continue
+                    if self.whatsapp_group_rate_limited(recipient):
+                        continue
+                    self.send_whatsapp_message(
+                        self.format_personal_alert(item),
+                        imagem,
+                        recipient,
+                    )
+                    enviados += 1
+
         return enviados > 0
+
+    def verified_whatsapp_image(self, item):
+        """Confirma na Shopee que a foto pertence ao ID do anúncio.
+
+        Os cartões da busca da Shopee são atualizados dinamicamente e podem
+        reutilizar temporariamente a foto de outro cartão. A API do próprio
+        anúncio usa os IDs presentes no link e evita esse desalinhamento.
+        """
+
+        current = str(self.value(item, "imagem", "") or "").strip()
+        if self.value(item, "imagem_manual", False):
+            return current
+        store = str(self.value(item, "loja", "") or "").casefold()
+        link = str(self.value(item, "link", "") or "").strip()
+
+        if "shopee" not in store and "shopee.com.br" not in link.casefold():
+            return current
+
+        match = (
+            re.search(r"-i\.(\d+)\.(\d+)(?:[/?#]|$)", link)
+            or re.search(r"/product/(\d+)/(\d+)(?:[/?#]|$)", link)
+        )
+        if not match:
+            return ""
+
+        shop_id, item_id = match.groups()
+        try:
+            response = requests.get(
+                "https://shopee.com.br/api/v4/pdp/get_pc",
+                params={"shop_id": shop_id, "item_id": item_id},
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                    ),
+                    "Referer": link,
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+            product = (response.json().get("data") or {}).get("item") or {}
+            image = product.get("image") or ""
+            if not image:
+                images = product.get("images") or []
+                image = images[0] if images else ""
+            image = str(image).strip()
+            if image and not image.startswith("http"):
+                image = f"https://down-br.img.susercontent.com/file/{image}"
+            if not image.startswith(("http://", "https://")):
+                return self.verified_shopee_cdn_image(current, link)
+
+            product_id = self.value(item, "id")
+            updater = (
+                getattr(self.database, "atualizar_imagem_produto", None)
+                if self.database is not None else None
+            )
+            if updater and product_id:
+                updater(product_id, image)
+            return image
+        except (requests.RequestException, ValueError, TypeError, AttributeError):
+            # A API de produto pode responder 403 mesmo com a página e o CDN
+            # públicos. Nesse caso, aceite somente a imagem que veio do mesmo
+            # cartão do anúncio e que o CDN oficial confirmar como imagem.
+            return self.verified_shopee_cdn_image(current, link)
+
+    @staticmethod
+    def verified_shopee_cdn_image(image_url, product_link):
+
+        image_url = str(image_url or "").strip()
+        product_link = str(product_link or "").strip()
+        image_host = (urlparse(image_url).hostname or "").casefold()
+
+        if (
+            not re.search(r"-i\.\d+\.\d+(?:[/?#]|$)", product_link)
+            or not image_url.startswith("https://")
+            or not (
+                image_host == "susercontent.com"
+                or image_host.endswith(".susercontent.com")
+            )
+        ):
+            return ""
+
+        try:
+            response = requests.get(
+                image_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://shopee.com.br/",
+                },
+                stream=True,
+                timeout=15,
+            )
+            response.raise_for_status()
+            content_type = str(
+                response.headers.get("Content-Type") or ""
+            ).casefold()
+            return image_url if content_type.startswith("image/") else ""
+        except requests.RequestException:
+            return ""
+        finally:
+            if "response" in locals():
+                response.close()
+
+    def prepare_whatsapp_image(self, image_url):
+
+        try:
+            response = requests.get(
+                str(image_url or "").strip(),
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                    ),
+                    "Referer": "https://shopee.com.br/",
+                    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                },
+                stream=True,
+                timeout=(10, 30),
+            )
+        except requests.Timeout as error:
+            raise ValueError(
+                "O download da imagem excedeu o tempo limite."
+            ) from error
+        except requests.ConnectionError as error:
+            raise ValueError(
+                "Nao foi possivel conectar ao servidor da imagem."
+            ) from error
+        except requests.RequestException as error:
+            raise ValueError(
+                f"Falha ao baixar a imagem: {error}"
+            ) from error
+
+        try:
+            if response.status_code != 200:
+                raise ValueError(
+                    f"A imagem respondeu com HTTP {response.status_code}."
+                )
+
+            content_type = str(
+                response.headers.get("Content-Type") or ""
+            ).casefold()
+            if not content_type.startswith("image/"):
+                raise ValueError(
+                    "A URL informada nao retornou conteudo de imagem."
+                )
+
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    declared_size = int(content_length)
+                except (TypeError, ValueError):
+                    declared_size = 0
+                if declared_size > self.MAX_MANUAL_IMAGE_BYTES:
+                    raise ValueError(
+                        "A imagem excede o limite de 15 MiB."
+                    )
+
+            content = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                if not chunk:
+                    continue
+                content.extend(chunk)
+                if len(content) > self.MAX_MANUAL_IMAGE_BYTES:
+                    raise ValueError(
+                        "A imagem excede o limite de 15 MiB."
+                    )
+
+            if not content:
+                raise ValueError("O arquivo de imagem esta vazio.")
+        finally:
+            response.close()
+
+        original = bytes(content)
+        try:
+            image = Image.open(BytesIO(original))
+            image.load()
+        except (
+            UnidentifiedImageError,
+            OSError,
+            Image.DecompressionBombError,
+        ) as error:
+            raise ValueError(
+                "O arquivo recebido nao e uma imagem valida."
+            ) from error
+
+        original_format = image.format
+        image = ImageOps.exif_transpose(image)
+        width, height = image.size
+        if (
+            width < self.MIN_MANUAL_IMAGE_WIDTH
+            or height < self.MIN_MANUAL_IMAGE_HEIGHT
+        ):
+            raise ValueError(
+                f"A imagem possui {width} x {height} pixels.\n\n"
+                "O minimo recomendado e 500 x 500 pixels para garantir "
+                "boa qualidade no WhatsApp.\n\n"
+                "Escolha outra imagem."
+            )
+
+        if original_format == "JPEG":
+            return original
+
+        has_transparency = (
+            image.mode in {"RGBA", "LA"}
+            or (
+                image.mode == "P"
+                and "transparency" in image.info
+            )
+        )
+        if has_transparency:
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", image.size, "white")
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            image = background
+        else:
+            image = image.convert("RGB")
+
+        output = BytesIO()
+        image.save(
+            output,
+            format="JPEG",
+            quality=90,
+            subsampling=0,
+            optimize=True,
+        )
+        return output.getvalue()
+
+    def is_unmissable_offer(self, item):
+
+        current = self.value(item, "preco_valor")
+        old_price = self.comparison_price(item)
+        try:
+            current = float(current)
+            old_price = float(old_price)
+        except (TypeError, ValueError):
+            return False
+
+        if current <= 0 or old_price <= current:
+            return False
+
+        discount = ((old_price - current) / old_price) * 100
+        saving = old_price - current
+        minimum_discount = self.float_env(
+            "PERSONAL_ALERT_MIN_DISCOUNT_PERCENT", 60
+        )
+        maximum_discount = self.float_env(
+            "PERSONAL_ALERT_MAX_DISCOUNT_PERCENT", 90
+        )
+        minimum_saving = self.float_env(
+            "PERSONAL_ALERT_MIN_SAVINGS", 50
+        )
+        minimum_price = self.float_env(
+            "PERSONAL_ALERT_MIN_PRICE", 5
+        )
+
+        return (
+            bool(self.personal_alert_phones())
+            and current >= minimum_price
+            and discount >= minimum_discount
+            and (maximum_discount <= 0 or discount <= maximum_discount)
+            and saving >= minimum_saving
+        )
+
+    def format_personal_alert(self, item):
+
+        return (
+            "\U0001f6a8 OFERTA IMPERDIVEL — COPIA PESSOAL\n"
+            "Esta oferta tambem foi encaminhada aos grupos.\n\n"
+            + self.format_alert(item)
+        )
 
     def whatsapp_group_rate_limited(self, recipient):
 
@@ -861,6 +1445,7 @@ class Notifier:
 
         recipients = self.whatsapp_groups() + self.whatsapp_phones()
         recipients.extend(self.whatsapp_category_groups().values())
+        recipients.extend(self.personal_alert_phones())
         return list(dict.fromkeys(recipients))[:10]
 
     def whatsapp_category_groups(self):
@@ -881,10 +1466,23 @@ class Notifier:
 
     def whatsapp_category(self, item):
 
-        text = " ".join([
+        manual_category = str(
+            self.value(item, "categoria_manual", "") or ""
+        ).strip()
+        if manual_category in self.WHATSAPP_CATEGORY_KEYWORDS:
+            return manual_category
+
+        if self.is_mercado_livre(item):
+            mercado_livre_category, _trace = (
+                self.detect_mercado_livre_category(item)
+            )
+            if mercado_livre_category:
+                return mercado_livre_category
+
+        text = self.searchable_text(" ".join([
             str(self.value(item, "titulo", "") or ""),
             str(self.value(item, "termo", "") or ""),
-        ]).casefold()
+        ]))
 
         keywords_by_category = dict(self.WHATSAPP_CATEGORY_KEYWORDS)
         if self.database is not None:
@@ -895,20 +1493,193 @@ class Notifier:
                     keywords_by_category[category] = tuple(keywords)
 
         for category, keywords in keywords_by_category.items():
-            if any(keyword.casefold() in text for keyword in keywords):
+            if any(self.searchable_text(keyword) in text for keyword in keywords):
                 return category
 
         return None
 
+    def detect_mercado_livre_category(self, item):
+        """Adaptação exclusiva para a taxonomia da página Mercado Livre."""
+
+        breadcrumb = str(
+            self.value(item, "breadcrumb", "") or ""
+        ).strip()
+        original = str(
+            self.value(item, "categoria_original", "") or ""
+        ).strip()
+        category_text = self.searchable_text(
+            " ".join(value for value in (breadcrumb, original) if value)
+        )
+        trace = {
+            "function": "Notifier.detect_mercado_livre_category",
+            "rule": "MERCADO_LIVRE_BREADCRUMB_KEYWORDS",
+            "breadcrumb": breadcrumb,
+            "original_category": original,
+            "comparison": "",
+        }
+        if not category_text:
+            trace["comparison"] = "breadcrumb_and_original_category_empty"
+            return None, trace
+        keywords_by_category = dict(self.WHATSAPP_CATEGORY_KEYWORDS)
+        if self.database is not None:
+            loader = getattr(self.database, "listar_palavras_categorias", None)
+            custom = loader() if loader else {}
+            for category, keywords in custom.items():
+                if keywords:
+                    keywords_by_category[category] = tuple(keywords)
+        comparisons = []
+        for category, keywords in keywords_by_category.items():
+            matched = next((
+                keyword for keyword in keywords
+                if self.searchable_text(keyword) in category_text
+            ), None)
+            if matched:
+                trace["comparison"] = (
+                    f"matched:{category}:{self.searchable_text(matched)}"
+                )
+                return category, trace
+            comparisons.append(category)
+        trace["comparison"] = (
+            "no_keyword_match_in:" + ",".join(comparisons)
+        )
+        return None, trace
+
+    def category_routing_diagnostic(self, item):
+        """Explica o roteamento sem aprovar ou modificar categorias."""
+
+        raw_manual = str(
+            self.value(item, "categoria_manual", "") or ""
+        ).strip()
+        ml_trace = None
+        if self.is_mercado_livre(item):
+            _ml_category, ml_trace = self.detect_mercado_livre_category(item)
+        detected = self.whatsapp_category(item)
+        source = (
+            "MANUAL_CATEGORY"
+            if raw_manual and detected == raw_manual
+            else "TITLE_KEYWORDS" if detected else "NOT_DETECTED"
+        )
+        groups = self.whatsapp_category_groups()
+        general = self.whatsapp_groups() + self.whatsapp_phones()
+        ml_received_category = bool(
+            ml_trace and (
+                ml_trace["breadcrumb"] or ml_trace["original_category"]
+            )
+        )
+        if raw_manual and raw_manual not in self.WHATSAPP_CATEGORY_KEYWORDS:
+            reason = "CATEGORY_NOT_MAPPED"
+        elif self.is_mercado_livre(item) and not detected and ml_received_category:
+            reason = "CATEGORY_NOT_MAPPED"
+        elif not detected:
+            reason = "CATEGORY_NOT_DETECTED"
+        elif detected not in self.WHATSAPP_CATEGORY_KEYWORDS:
+            reason = "CATEGORY_NORMALIZATION_FAILED"
+        elif groups and detected not in groups:
+            reason = "CATEGORY_WITHOUT_DESTINATION"
+        elif not groups and not general:
+            reason = "CATEGORY_WITHOUT_DESTINATION"
+        else:
+            reason = "READY"
+        destination = groups.get(detected, "") if detected else ""
+        if not destination and general:
+            destination = general[0]
+        diagnostic = {
+            "detected_category": (
+                raw_manual
+                or detected
+                or (
+                    ml_trace["original_category"]
+                    if ml_trace else ""
+                )
+                or (
+                    ml_trace["breadcrumb"]
+                    if ml_trace else ""
+                )
+            ),
+            "canonical_category": detected or "",
+            "source": source,
+            "reason": reason,
+            "destination_configured": bool(destination),
+            "breadcrumb": (
+                ml_trace["breadcrumb"] if ml_trace else ""
+            ),
+            "original_category": (
+                ml_trace["original_category"] if ml_trace else ""
+            ),
+            "detector_function": (
+                ml_trace["function"]
+                if ml_trace else "Notifier.whatsapp_category"
+            ),
+            "applied_rule": (
+                ml_trace["rule"]
+                if ml_trace else "TITLE_OR_MANUAL_CATEGORY_KEYWORDS"
+            ),
+            "failed_comparison": (
+                ml_trace["comparison"] if ml_trace else ""
+            ),
+        }
+        logger.info(
+            "category classification diagnostic: store=%s product=%s "
+            "original_url=%s title=%s breadcrumb=%s original_category=%s "
+            "detected_category=%s canonical_category=%s "
+            "group_found=%s detector_function=%s applied_rule=%s "
+            "comparison=%s rejection_reason=%s",
+            str(self.value(item, "loja", "") or ""),
+            str(self.value(item, "titulo", "") or ""),
+            str(self.value(item, "link", "") or ""),
+            str(self.value(item, "titulo", "") or ""),
+            diagnostic["breadcrumb"] or "NOT_RECEIVED",
+            diagnostic["original_category"] or "NOT_RECEIVED",
+            diagnostic["detected_category"] or "NOT_DETECTED",
+            diagnostic["canonical_category"] or "NOT_MAPPED",
+            bool(destination),
+            diagnostic["detector_function"],
+            diagnostic["applied_rule"],
+            diagnostic["failed_comparison"] or "NOT_APPLICABLE",
+            reason,
+        )
+        return diagnostic
+
+    def category_block_message(self, item):
+        diagnostic = self.category_routing_diagnostic(item)
+        title = str(self.value(item, "titulo", "") or "Produto").strip()
+        store = str(self.value(item, "loja", "") or "Loja não informada").strip()
+        detected = diagnostic["detected_category"] or "Não detectada"
+        canonical = diagnostic["canonical_category"] or "Não atribuída"
+        return "\n".join((
+            "Envio bloqueado",
+            "",
+            f"Produto: {title}",
+            f"Loja: {store}",
+            f"Categoria detectada: {detected}",
+            f"Categoria canônica: {canonical}",
+            "Status: categoria ainda não está aprovada para envio.",
+            f"Motivo técnico: {diagnostic['reason']}",
+            "Ação recomendada: abra “Central Categorias”, revise a "
+            "categoria e confirme um grupo de destino.",
+        ))
+
+    @staticmethod
+    def searchable_text(value):
+        """Normaliza caixa e acentos para classificar titulos com seguranca."""
+
+        normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
+        return "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        )
+
     def whatsapp_recipients_for_alert(self, item):
 
         category_groups = self.whatsapp_category_groups()
-        if not category_groups:
-            return self.whatsapp_recipients()
-
-        category = self.whatsapp_category(item)
-        recipient = category_groups.get(category)
-        return [recipient] if recipient else []
+        recipients = self.whatsapp_groups() + self.whatsapp_phones()
+        if category_groups:
+            category = self.whatsapp_category(item)
+            recipient = category_groups.get(category)
+            if recipient:
+                recipients.append(recipient)
+        return list(dict.fromkeys(recipients))[:10]
 
     def whatsapp_groups(self):
 
@@ -929,6 +1700,16 @@ class Notifier:
             for phone in phones.split(",")
             if phone.strip()
         ][:10]
+
+    def personal_alert_phones(self):
+
+        phones = os.getenv("WHATSAPP_PERSONAL_ALERT_PHONES", "")
+        normalized = []
+        for phone in phones.split(","):
+            digits = re.sub(r"\D", "", phone)
+            if 12 <= len(digits) <= 13:
+                normalized.append(digits)
+        return list(dict.fromkeys(normalized))[:3]
 
     def value(self, item, key, default=None):
 
@@ -982,27 +1763,109 @@ class Notifier:
         api_url = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
         instance = os.getenv("EVOLUTION_INSTANCE")
         api_key = os.getenv("EVOLUTION_API_KEY")
+        endpoint = f"{api_url}/message/sendMedia/{instance}"
+        diagnostic_logger = self.evolution_diagnostic_logger()
 
-        response = requests.post(
-            f"{api_url}/message/sendMedia/{instance}",
-            json={
-                "number": phone,
-                "mediatype": "image",
-                "mimetype": "image/jpeg",
-                "caption": message[:1000],
-                "media": image_url,
-                "fileName": "produto.jpg",
-                "linkPreview": True,
-            },
-            headers={
-                "apikey": api_key,
-                "Content-Type": "application/json",
-            },
-            timeout=30
+        if isinstance(image_url, (bytes, bytearray)):
+            request_kwargs = {
+                "data": {
+                    "number": phone,
+                    "mediatype": "image",
+                    "caption": message[:1000],
+                    "fileName": "produto.jpg",
+                },
+                "files": {
+                    "media": (
+                        "produto.jpg",
+                        bytes(image_url),
+                        "image/jpeg",
+                    )
+                },
+                "headers": {"apikey": api_key},
+                "timeout": 30,
+            }
+            diagnostic_payload = {
+                **request_kwargs["data"],
+                "media": {
+                    "fileName": "produto.jpg",
+                    "mimetype": "image/jpeg",
+                    "size_bytes": len(image_url),
+                },
+                "headers": {"apikey": "<redacted>"},
+            }
+        else:
+            request_kwargs = {
+                "json": {
+                    "number": phone,
+                    "mediatype": "image",
+                    "mimetype": "image/jpeg",
+                    "caption": message[:1000],
+                    "media": image_url,
+                    "fileName": "produto.jpg",
+                    "linkPreview": True,
+                },
+                "headers": {
+                    "apikey": api_key,
+                    "Content-Type": "application/json",
+                },
+                "timeout": 30,
+            }
+            diagnostic_payload = {
+                **request_kwargs["json"],
+                "headers": {
+                    "apikey": "<redacted>",
+                    "Content-Type": "application/json",
+                },
+            }
+
+        diagnostic_logger.warning(
+            "Evolution API diagnostico temporario: POST %s payload=%r",
+            endpoint,
+            diagnostic_payload,
         )
-        response.raise_for_status()
-
-        return True
+        response = None
+        try:
+            response = requests.post(
+                endpoint,
+                **request_kwargs,
+            )
+            try:
+                response_json = response.json()
+            except ValueError:
+                response_json = None
+            diagnostic_logger.warning(
+                "Evolution API diagnostico temporario: "
+                "status_code=%s response_text=%r response_json=%r",
+                response.status_code,
+                response.text,
+                response_json,
+            )
+            response.raise_for_status()
+            return True
+        except Exception:
+            if response is None:
+                diagnostic_logger.exception(
+                    "Evolution API diagnostico temporario: falha antes de "
+                    "receber resposta. endpoint=%s payload=%r",
+                    endpoint,
+                    diagnostic_payload,
+                )
+            else:
+                try:
+                    response_json = response.json()
+                except ValueError:
+                    response_json = None
+                diagnostic_logger.exception(
+                    "Evolution API diagnostico temporario: HTTP/falha no "
+                    "processamento. endpoint=%s status_code=%s "
+                    "response_text=%r response_json=%r payload=%r",
+                    endpoint,
+                    response.status_code,
+                    response.text,
+                    response_json,
+                    diagnostic_payload,
+                )
+            raise
 
     def send_zapi_image(self, message, image_url, phone):
 

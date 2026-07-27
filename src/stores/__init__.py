@@ -1,10 +1,10 @@
 from .base_store import BaseStore
-from .americanas import Americanas
-from .casas_bahia import CasasBahia
 from .mercado_livre import MercadoLivre
 from .amazon import Amazon
-from .kabum import Kabum
-from .magalu import Magalu
 from .shopee import Shopee
-from .terabyte import Terabyte
-from .pichau import Pichau
+from .active import (
+    ACTIVE_STORE_NAMES,
+    active_store_names,
+    filter_active_products,
+    is_active_store,
+)
