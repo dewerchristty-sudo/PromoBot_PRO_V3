@@ -5,14 +5,21 @@ Cada instância guarda os metadados de um produto (URL, loja, intervalo,
 status) e serve como unidade atômica para o módulo de monitoramento.
 Nenhuma lógica de scraping é incluída — apenas estrutura de dados e
 mudanças de estado.
+
+ProductWatcherManager — gerencia múltiplos ProductWatchers e integra
+com o Scheduler para verificação periódica.
 """
 
 from __future__ import annotations
 
 import enum
+import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class WatcherStatus(enum.Enum):
@@ -159,4 +166,181 @@ class ProductWatcher:
             consecutive_errors=data.get("consecutive_errors", 0),
             max_errors=data.get("max_errors", 5),
             tags=set(data.get("tags", [])),
+        )
+
+
+class ProductWatcherManager:
+    """
+    Gerencia o registro, monitoramento e verificação periódica de produtos.
+
+    Integra-se ao Scheduler para executar verificações em intervalos
+    regulares sem bloquear a thread principal.
+
+    Características:
+        - Registro e remoção thread-safe de ProductWatchers.
+        - Prevenção de registros duplicados (mesmo product_id).
+        - Callback opcional acionado para cada produto "devido".
+        - Início/parada segura do monitoramento.
+        - Não executa callbacks após ser parado.
+        - Logging de erros nas callbacks.
+    """
+
+    def __init__(
+        self,
+        scheduler: Optional[Scheduler] = None,
+        on_check: Optional[Callable[[ProductWatcher], None]] = None,
+        poll_interval_seconds: float = 60.0,
+    ) -> None:
+        """
+        Args:
+            scheduler: Instância de Scheduler a ser usada.
+                Se None, cria uma nova internamente.
+            on_check: Callable opcional invocada para cada produto
+                que precisa ser verificado. Recebe o ProductWatcher.
+            poll_interval_seconds: Intervalo do loop de verificação
+                no Scheduler (segundos). Padrão 60s.
+        """
+        from src.monitor.scheduler import Scheduler  # lazy import to avoid circular dependency
+
+        self._scheduler = scheduler or Scheduler()
+        self._on_check = on_check
+        self._poll_interval = poll_interval_seconds
+        self._products: dict[str, ProductWatcher] = {}
+        self._lock = threading.Lock()
+        self._stopped = False
+
+    # ── registro / remoção ──────────────────────────────────────────
+
+    def register(self, product: ProductWatcher) -> None:
+        """
+        Registra um produto para monitoramento.
+
+        Args:
+            product: ProductWatcher a ser registrado.
+
+        Raises:
+            ValueError: Se o product_id já estiver registrado.
+        """
+        with self._lock:
+            if product.product_id in self._products:
+                raise ValueError(
+                    f"Produto '{product.product_id}' já está registrado."
+                )
+            self._products[product.product_id] = product
+
+    def remove(self, product_id: str) -> Optional[ProductWatcher]:
+        """
+        Remove um produto pelo identificador.
+
+        Args:
+            product_id: ID do produto a remover.
+
+        Returns:
+            O ProductWatcher removido, ou None se não encontrado.
+        """
+        with self._lock:
+            return self._products.pop(product_id, None)
+
+    def get(self, product_id: str) -> Optional[ProductWatcher]:
+        """Retorna um produto pelo ID, sem removê-lo."""
+        with self._lock:
+            return self._products.get(product_id)
+
+    def list_all(self) -> list[ProductWatcher]:
+        """Retorna uma cópia da lista de todos os produtos registrados."""
+        with self._lock:
+            return list(self._products.values())
+
+    # ── propriedades ────────────────────────────────────────────────
+
+    @property
+    def count(self) -> int:
+        """Número de produtos registrados."""
+        with self._lock:
+            return len(self._products)
+
+    @property
+    def is_running(self) -> bool:
+        """Indica se o monitoramento está em execução."""
+        return self._scheduler.is_running
+
+    @property
+    def products(self) -> list[ProductWatcher]:
+        """Lista de todos os produtos registrados (atalho para list_all)."""
+        return self.list_all()
+
+    # ── ciclo de vida ───────────────────────────────────────────────
+
+    def start(self) -> None:
+        """
+        Inicia o monitoramento periódico dos produtos registrados.
+
+        Cria uma tarefa no Scheduler que verifica periodicamente
+        quais produtos estão "devidos" e chama o on_check para cada um.
+        A execução ocorre em thread daemon (não bloqueia a main thread).
+        """
+        self._stopped = False
+
+        # Registra a task de verificação no scheduler
+        self._scheduler.register(
+            task_id="product_watcher_check",
+            callback=self._check_due_products,
+            interval_seconds=self._poll_interval,
+        )
+        self._scheduler.start()
+
+    def stop(self, wait: bool = True) -> None:
+        """
+        Para o monitoramento de forma segura.
+
+        Após parar, nenhum callback será executado mesmo que
+        produtos estejam devidos.
+
+        Args:
+            wait: Se True, aguarda a thread do scheduler finalizar.
+        """
+        self._stopped = True
+        if self._scheduler.is_running:
+            self._scheduler.stop(wait=wait)
+        # Remove a task do scheduler para permitir re-registro
+        if self._scheduler.task_exists("product_watcher_check"):
+            self._scheduler.remove("product_watcher_check")
+
+    # ── lógica interna ──────────────────────────────────────────────
+
+    def _check_due_products(self) -> None:
+        """
+        Verifica quais produtos estão "devidos" e chama on_check.
+
+        Esta é a callback registrada no Scheduler. É chamada
+        periodicamente no intervalo configurado.
+
+        Se o manager foi parado (stopped), não executa nada.
+        Erros nas callbacks são logados, nunca propagados.
+        """
+        if self._stopped:
+            return
+
+        due: list[ProductWatcher] = []
+        with self._lock:
+            for product in self._products.values():
+                if product.is_due():
+                    due.append(product)
+
+        for product in due:
+            try:
+                if self._on_check is not None:
+                    self._on_check(product)
+            except Exception as exc:
+                logger.error(
+                    "Erro ao verificar produto '%s': %s",
+                    product.product_id,
+                    exc,
+                )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ProductWatcherManager"
+            f" products={self.count}"
+            f" running={self.is_running}>"
         )
