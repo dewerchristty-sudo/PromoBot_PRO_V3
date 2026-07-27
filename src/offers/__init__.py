@@ -1,5 +1,6 @@
 """Domínio isolado de análise inteligente de ofertas."""
 
+from .detector import OfferDetection, OfferDetector, OfferDetectorConfig, OfferRating
 from .filters import FilterResult, OfferFilter, OfferFilterPolicy
 from .duplicates import (
     DuplicateChecker,
@@ -36,6 +37,10 @@ from .price_history_dashboard import PriceHistoryDashboard
 
 __all__ = [
     "FilterResult",
+    "OfferDetection",
+    "OfferDetector",
+    "OfferDetectorConfig",
+    "OfferRating",
     "DuplicateChecker",
     "DuplicateCheckResult",
     "InMemoryDuplicateHistoryStore",
