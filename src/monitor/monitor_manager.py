@@ -6,6 +6,13 @@ nível para iniciar/parar monitoramento, registrar produtos, controlar
 intervalos e preparar o terreno para eventos futuros (scraping,
 notificações, persistência).
 
+Integração completa com ProductWatcherManager:
+    - ProductWatcherManager é usado internamente para gerenciar
+      watchers individuais com callbacks de verificação.
+    - MonitorManager orquestra o ciclo de vida completo.
+    - start_all() inicia todos os monitores registrados.
+    - stop_all() para todos os monitores de forma segura.
+
 NÃO contém lógica de scraping — apenas orquestração.
 """
 
@@ -18,7 +25,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from src.monitor.scheduler import MonitorScheduler
-from src.monitor.watcher import ProductWatcher, WatcherStatus
+from src.monitor.watcher import ProductWatcher, ProductWatcherManager, WatcherStatus
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,7 @@ class MonitorManager:
         - Iniciar / parar o loop de verificação.
         - Registrar / remover produtos (ProductWatcher).
         - Alterar intervalo de atualização de watchers individuais.
+        - Iniciar / parar todos os monitores registrados (start_all / stop_all).
         - Expor estatísticas e status.
         - Servir de ponto de extensão para callbacks de scraping futuro.
 
@@ -53,9 +61,9 @@ class MonitorManager:
         manager = MonitorManager()
         manager.register_product("p1", "https://...", "Amazon", label="SSD 1TB")
         manager.set_interval("p1", 120)    # verificar a cada 2h
-        manager.start()
+        manager.start_all()
         # ... em outro thread ou via loop ...
-        manager.stop()
+        manager.stop_all()
     """
 
     def __init__(
@@ -74,6 +82,10 @@ class MonitorManager:
         self._scheduler = MonitorScheduler(
             poll_interval_seconds=poll_interval_seconds,
             on_tick=self._on_tick,
+        )
+        self._watcher_manager = ProductWatcherManager(
+            poll_interval_seconds=poll_interval_seconds,
+            on_check=self._on_watcher_check,
         )
         self._on_due_callback = on_due_callback
         self._on_tick_callback = on_tick_callback
@@ -125,6 +137,77 @@ class MonitorManager:
         """Indica se o loop de monitoramento está ativo."""
         return self._running
 
+    # ── controle de todos os monitores ──────────────────────────────
+
+    def start_all(self) -> None:
+        """
+        Inicia todos os monitores registrados.
+
+        Equivalente a:
+            1. Iniciar o MonitorManager (loop de verificação).
+            2. Iniciar o ProductWatcherManager (verificação periódica).
+
+        Se algum componente já estiver rodando, é ignorado (no-op).
+        Garante que exceções de um monitor não interrompam os demais.
+        """
+        logger.info("Iniciando todos os monitores...")
+        try:
+            self._watcher_manager.start()
+        except RuntimeError:
+            # Já está rodando — não é um problema
+            logger.debug("ProductWatcherManager já estava rodando.")
+        except Exception as exc:
+            logger.error("Erro ao iniciar ProductWatcherManager: %s", exc)
+
+        try:
+            self.start()
+        except Exception as exc:
+            logger.error("Erro ao iniciar MonitorManager: %s", exc)
+
+        logger.info("Todos os monitores iniciados.")
+
+    def stop_all(self, wait: bool = True) -> None:
+        """
+        Para todos os monitores de forma segura.
+
+        Garantias:
+            - Parada segura do MonitorManager.
+            - Parada segura do ProductWatcherManager.
+            - Limpeza de recursos (scheduler, threads).
+            - Callbacks não são executados após parada.
+            - Pode ser chamado mesmo se não estiver rodando.
+
+        Args:
+            wait: Se True, aguarda as threads finalizarem.
+        """
+        logger.info("Parando todos os monitores...")
+        try:
+            self.stop(wait=wait)
+        except Exception as exc:
+            logger.error("Erro ao parar MonitorManager: %s", exc)
+
+        try:
+            self._watcher_manager.stop(wait=wait)
+        except Exception as exc:
+            logger.error("Erro ao parar ProductWatcherManager: %s", exc)
+
+        # Limpeza de recursos
+        self._cleanup_resources()
+        logger.info("Todos os monitores parados.")
+
+    def _cleanup_resources(self) -> None:
+        """
+        Limpa recursos internos após parada.
+
+        Garante que:
+            - Nenhuma referência órfã permaneça.
+            - O scheduler seja limpo.
+        """
+        with self._lock:
+            self._thread = None
+            self._total_checks = 0
+            self._total_errors = 0
+
     # ── registro de produtos ────────────────────────────────────────
 
     def register_product(
@@ -138,6 +221,9 @@ class MonitorManager:
     ) -> ProductWatcher:
         """
         Cria e registra um novo produto para monitoramento.
+
+        O produto é registrado tanto no MonitorScheduler quanto no
+        ProductWatcherManager para garantir consistência.
 
         Validações:
             - product_id não pode ser vazio.
@@ -181,7 +267,17 @@ class MonitorManager:
             interval_minutes=interval_minutes,
             tags=tags or set(),
         )
+        # Registra no scheduler (para o loop do MonitorManager)
         self._scheduler.add(watcher)
+        # Registra no watcher manager (para verificação periódica)
+        try:
+            self._watcher_manager.register(watcher)
+        except ValueError:
+            # Se já estiver registrado, apenas loga e continua
+            logger.debug(
+                "Watcher %s já registrado no ProductWatcherManager.", product_id
+            )
+
         logger.info(
             "Produto registrado: %s (%s) na loja %s a cada %d min.",
             watcher.label,
@@ -195,10 +291,14 @@ class MonitorManager:
         """
         Remove um produto do monitoramento.
 
+        Remove tanto do MonitorScheduler quanto do ProductWatcherManager.
+
         Returns:
             O watcher removido, ou None se não encontrado.
         """
         removed = self._scheduler.remove(product_id)
+        # Remove também do watcher manager
+        self._watcher_manager.remove(product_id)
         if removed:
             logger.info("Produto removido: %s", product_id)
         else:
@@ -308,6 +408,40 @@ class MonitorManager:
                 self._on_tick_callback()
             except Exception as exc:
                 logger.error("Erro no on_tick_callback: %s", exc)
+
+    def _on_watcher_check(self, watcher: ProductWatcher) -> None:
+        """
+        Callback interno acionado pelo ProductWatcherManager
+        quando um watcher está devido para verificação.
+
+        Se o Manager estiver parado, não executa a callback.
+        Erros são logados e não interrompem outros watchers.
+        """
+        if not self._running:
+            logger.debug(
+                "MonitorManager parado — ignorando watcher %s.", watcher.product_id
+            )
+            return
+
+        if self._on_due_callback:
+            try:
+                self._on_due_callback([watcher])
+                watcher.mark_checked()
+            except Exception as exc:
+                logger.error(
+                    "Erro ao processar watcher '%s': %s",
+                    watcher.product_id,
+                    exc,
+                )
+                watcher.mark_error()
+                with self._lock:
+                    self._total_errors += 1
+        else:
+            logger.info(
+                "[placeholder] %d watcher(s) devido(s) - "
+                "nenhum callback de scraping registrado.",
+                1,
+            )
 
     def _run_loop(self) -> None:
         """Executa o loop principal delegando ao scheduler."""

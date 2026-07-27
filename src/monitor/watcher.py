@@ -278,6 +278,8 @@ class ProductWatcherManager:
         Cria uma tarefa no Scheduler que verifica periodicamente
         quais produtos estão "devidos" e chama o on_check para cada um.
         A execução ocorre em thread daemon (não bloqueia a main thread).
+
+        Se já estiver rodando, levanta RuntimeError.
         """
         self._stopped = False
 
@@ -288,6 +290,9 @@ class ProductWatcherManager:
             interval_seconds=self._poll_interval,
         )
         self._scheduler.start()
+        logger.info(
+            "ProductWatcherManager iniciado com %d produto(s).", self.count
+        )
 
     def stop(self, wait: bool = True) -> None:
         """

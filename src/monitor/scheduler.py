@@ -187,14 +187,23 @@ class MonitorScheduler:
         """
         effective_stop = stop_event or self._stop_event
         effective_stop.clear()
+        logger.debug(
+            "MonitorScheduler.run_loop iniciado (poll_interval=%.1fs).",
+            self._poll_interval,
+        )
 
         while not effective_stop.is_set():
             due = self.pop_due()
             if due:
+                logger.debug(
+                    "MonitorScheduler: %d watcher(s) devido(s).", len(due)
+                )
                 on_due(due)
             if self._on_tick:
                 self._on_tick()
             effective_stop.wait(self._poll_interval)
+
+        logger.debug("MonitorScheduler.run_loop finalizado.")
 
     def stop_loop(self) -> None:
         """Sinaliza para o loop principal parar."""
