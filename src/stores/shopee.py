@@ -1,14 +1,14 @@
-from urllib.parse import quote_plus
-from html import unescape
+import json
 import logging
 import re
+import time
+from html import unescape
+from urllib.parse import quote_plus
 
 from bs4 import BeautifulSoup
 
 from src.constants import TIMEOUT_WAIT_MEDIUM
-from src.core.browser_manager import BrowserManager
 from src.stores.base_store import BaseStore
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +174,7 @@ class Shopee(BaseStore):
     def _search_url(self, url, stealth):
 
         resultados = []
-        manager = BrowserManager(headless=True)
-        page = manager.new_page(stealth=stealth)
+        page = self.browser_manager.new_page(stealth=stealth)
 
         try:
 
@@ -190,10 +189,7 @@ class Shopee(BaseStore):
             if self.is_verify_page(page):
                 return None
 
-            cards = self._extract_cards(page, "a[href*='-i.']")
-
-            if not cards:
-                cards = self._extract_cards(page, "a[href*='/product/']")
+            cards = self._extract_cards(page)
 
             print(f"Produtos encontrados: {len(cards)}")
 
@@ -215,17 +211,28 @@ class Shopee(BaseStore):
                     titulo = self.extract_title(linhas, item.get("imageAlt", ""))
                     preco = self.extract_price(linhas)
 
-                    if titulo and preco:
+                    if not titulo or not preco:
+                        continue
 
-                        resultados.append({
+                    # Filtra anúncios inválidos (ex: "Patrocinado", "Anúncio")
+                    if self._is_invalid_ad(titulo, linhas):
+                        logger.debug(f"Shopee: anúncio inválido ignorado: {titulo}")
+                        continue
 
-                            "loja": self.name,
-                            "titulo": titulo,
-                            "preco": preco,
-                            "link": link,
-                            "imagem": item.get("image", "")
+                    resultado = {
+                        "loja": self.name,
+                        "titulo": titulo,
+                        "preco": preco,
+                        "link": link,
+                        "imagem": item.get("image", ""),
+                    }
 
-                        })
+                    # Tenta extrair preço anterior do texto do card
+                    old_price = self._extract_old_price_from_lines(linhas, preco)
+                    if old_price:
+                        resultado["preco_antigo"] = old_price
+
+                    resultados.append(resultado)
 
                     if len(resultados) >= 20:
                         break
@@ -240,7 +247,36 @@ class Shopee(BaseStore):
 
         finally:
             page.close()
-            manager.close()
+
+    # ======================================================
+
+    @staticmethod
+    def _is_invalid_ad(titulo, lines):
+        """Verifica se o card é um anúncio inválido (patrocinado, etc)."""
+        text = " ".join(lines).lower()
+        markers = [
+            "patrocinado", "anúncio", "anuncio", "ad",
+            "propaganda", "publicidade",
+        ]
+        for marker in markers:
+            if marker in text:
+                return True
+        return False
+
+    # ======================================================
+
+    @classmethod
+    def _extract_old_price_from_lines(cls, lines, current_price):
+        """Tenta extrair preço anterior das linhas do card."""
+        prices = []
+        for line in lines:
+            if "R$" in line:
+                raw = cls.normalize_price(line)
+                if raw and cls.price_number(raw) > cls.price_number(current_price):
+                    prices.append(raw)
+        if prices:
+            return max(prices, key=cls.price_number)
+        return ""
 
     # ======================================================
 
@@ -263,7 +299,23 @@ class Shopee(BaseStore):
 
     # ======================================================
 
-    def _extract_cards(self, page, selector):
+    def _extract_cards(self, page):
+        """Extrai cards de produtos com múltiplos seletores para robustez."""
+
+        selectors = [
+            "a[href*='-i.']",
+            "a[href*='/product/']",
+            "a[href*='shopee.com.br']",
+        ]
+
+        for selector in selectors:
+            cards = self._evaluate_cards(page, selector)
+            if cards:
+                return cards
+
+        return []
+
+    def _evaluate_cards(self, page, selector):
 
         try:
             return page.locator(selector).evaluate_all(
@@ -282,7 +334,7 @@ class Shopee(BaseStore):
                 """
             )
         except Exception as e:
-            logger.debug(f"Erro ao extrair cards do Shopee: {str(e)}")
+            logger.debug(f"Erro ao extrair cards do Shopee com seletor '{selector}': {str(e)}")
             return []
 
     # ======================================================
@@ -344,16 +396,13 @@ class Shopee(BaseStore):
             headless = attempt["headless"]
             stealth = attempt["stealth"]
 
-            manager = BrowserManager(headless=headless)
-            page = manager.new_page(stealth=stealth)
+            page = self.browser_manager.new_page(stealth=stealth)
 
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 page.wait_for_timeout(8000)
 
                 verify_page = self.is_verify_page(page)
-
-                import json
 
                 content = page.content()
                 soup = BeautifulSoup(content, "lxml")
@@ -501,7 +550,6 @@ class Shopee(BaseStore):
 
             finally:
                 page.close()
-                manager.close()
 
         # Todas as tentativas falharam
         raise ValueError(last_error)

@@ -302,6 +302,75 @@ class StoresTest(unittest.TestCase):
 
         self.assertTrue(store.is_verify_page(FakePage()))
 
+    def test_shopee_filtra_anuncio_patrocinado(self):
+
+        self.assertTrue(
+            Shopee._is_invalid_ad("Fone Bluetooth", ["Patrocinado", "Fone Bluetooth"])
+        )
+        self.assertTrue(
+            Shopee._is_invalid_ad("Mouse Gamer", ["Anúncio", "Mouse Gamer"])
+        )
+        self.assertFalse(
+            Shopee._is_invalid_ad("Fone Bluetooth Sem Fio", ["Fone Bluetooth Sem Fio", "R$ 21,99"])
+        )
+
+    def test_shopee_extrai_preco_anterior_das_linhas_do_card(self):
+
+        self.assertEqual(
+            Shopee._extract_old_price_from_lines(
+                ["Fone Bluetooth", "R$ 21,99", "R$ 65,80", "-67%"],
+                "21,99",
+            ),
+            "65,80",
+        )
+        self.assertEqual(
+            Shopee._extract_old_price_from_lines(
+                ["Fone Bluetooth", "R$ 21,99"],
+                "21,99",
+            ),
+            "",
+        )
+
+    def test_shopee_extrai_cards_com_multiplos_seletores(self):
+
+        store = Shopee()
+
+        class FakePage:
+            class Locator:
+                @staticmethod
+                def evaluate_all(_script):
+                    return [
+                        {
+                            "href": "https://shopee.com.br/produto-i.12345.67890",
+                            "text": "Fone Bluetooth\nR$\n21,99",
+                            "image": "https://susercontent.com/img.jpg",
+                            "imageAlt": "Fone Bluetooth Sem Fio",
+                        }
+                    ]
+
+            def locator(self, selector):
+                return self.Locator()
+
+        cards = store._extract_cards(FakePage())
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["href"], "https://shopee.com.br/produto-i.12345.67890")
+
+    def test_shopee_extrai_cards_retorna_vazio_quando_sem_resultados(self):
+
+        store = Shopee()
+
+        class FakePage:
+            class Locator:
+                @staticmethod
+                def evaluate_all(_script):
+                    return []
+
+            def locator(self, selector):
+                return self.Locator()
+
+        cards = store._extract_cards(FakePage())
+        self.assertEqual(cards, [])
+
     def test_sanitize_remove_resultados_invalidos(self):
 
         manager = StoreManager(enabled_stores=[])
