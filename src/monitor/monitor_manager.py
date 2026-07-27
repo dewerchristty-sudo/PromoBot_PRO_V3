@@ -139,9 +139,40 @@ class MonitorManager:
         """
         Cria e registra um novo produto para monitoramento.
 
+        Validações:
+            - product_id não pode ser vazio.
+            - Evita duplicação de product_id (já registrado).
+            - Evita duplicação de mesma URL + loja.
+            - Intervalo deve ser >= 1 minuto.
+
         Returns:
             A instância de ProductWatcher criada.
+
+        Raises:
+            ValueError: Se o product_id já existir, se a combinação
+                URL+loja já estiver registrada, ou se o intervalo
+                for inválido.
         """
+        if not product_id or not product_id.strip():
+            raise ValueError("product_id não pode ser vazio.")
+
+        # Evita duplicação de product_id
+        existing_by_id = self._scheduler.get(product_id)
+        if existing_by_id is not None:
+            raise ValueError(
+                f"Produto com ID '{product_id}' já está registrado."
+            )
+
+        # Evita duplicação de mesma URL + loja
+        for watcher in self._scheduler.list_all():
+            if watcher.url == url and watcher.store == store:
+                raise ValueError(
+                    f"Produto com URL '{url}' e loja '{store}' já está "
+                    f"registrado (ID: {watcher.product_id})."
+                )
+
+        self._validate_interval(interval_minutes)
+
         watcher = ProductWatcher(
             product_id=product_id,
             url=url,
@@ -194,12 +225,16 @@ class MonitorManager:
 
         Returns:
             True se o produto foi encontrado e atualizado.
+
+        Raises:
+            ValueError: Se o intervalo for inválido (< 1 minuto).
         """
+        self._validate_interval(interval_minutes)
         watcher = self._scheduler.get(product_id)
         if watcher is None:
             logger.warning("Produto não encontrado: %s", product_id)
             return False
-        watcher.interval_minutes = max(interval_minutes, 1)
+        watcher.interval_minutes = interval_minutes
         logger.info(
             "Intervalo alterado: %s -> %d min", product_id, interval_minutes
         )
@@ -317,6 +352,25 @@ class MonitorManager:
                 )
                 continue
             self._scheduler.reschedule(w)
+
+    # ── validação de intervalo ────────────────────────────────────
+
+    @staticmethod
+    def _validate_interval(minutes: int) -> None:
+        """
+        Valida que o intervalo em minutos é um valor positivo.
+
+        Raises:
+            ValueError: Se minutos < 1.
+        """
+        if not isinstance(minutes, int):
+            raise ValueError(
+                f"Intervalo deve ser um número inteiro, recebeu {type(minutes).__name__}."
+            )
+        if minutes < 1:
+            raise ValueError(
+                f"Intervalo mínimo é 1 minuto, recebeu {minutes}."
+            )
 
     # ── dunder ──────────────────────────────────────────────────────
 
