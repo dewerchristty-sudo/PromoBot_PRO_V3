@@ -9,12 +9,16 @@ intervalos individuais e fornecendo uma fila prioritária de watchers
 from __future__ import annotations
 
 import heapq
+import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Event, Lock
 from typing import Callable, Optional
 
 from src.monitor.watcher import ProductWatcher
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(order=True)
@@ -211,3 +215,234 @@ class MonitorScheduler:
 
     def __repr__(self) -> str:
         return f"<MonitorScheduler watchers={self.count} pending={len(self._queue)}>"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Scheduler — agendador independente e thread-safe
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class ScheduledTask:
+    """
+    Representa uma tarefa agendada no Scheduler.
+
+    Attributes:
+        task_id: Identificador único da tarefa.
+        callback: Função a ser executada periodicamente.
+        interval_seconds: Intervalo entre execuções em segundos.
+        last_run: Timestamp da última execução.
+        next_run: Timestamp da próxima execução.
+    """
+
+    task_id: str
+    callback: Callable[[], None]
+    interval_seconds: float
+    last_run: Optional[datetime] = None
+    next_run: Optional[datetime] = None
+
+
+class Scheduler:
+    """
+    Agendador simples, modular, thread-safe e independente.
+
+    Gerencia tarefas que executam callbacks em intervalos fixos,
+    sem depender de ProductWatcher ou MonitorManager.
+
+    Uso típico:
+        sched = Scheduler()
+        sched.register("task1", my_callback, interval_seconds=30)
+        sched.start()
+        # ... em outra thread ...
+        sched.stop()
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[str, ScheduledTask] = {}
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+
+    # ── registro / remoção ──────────────────────────────────────────
+
+    def register(
+        self,
+        task_id: str,
+        callback: Callable[[], None],
+        interval_seconds: float,
+    ) -> None:
+        """
+        Registra uma nova tarefa no scheduler.
+
+        Args:
+            task_id: Identificador único da tarefa.
+            callback: Função a ser executada periodicamente.
+            interval_seconds: Intervalo entre execuções em segundos.
+
+        Raises:
+            ValueError: Se task_id já estiver registrado ou se o
+                intervalo for inválido.
+        """
+        if not task_id or not task_id.strip():
+            raise ValueError("task_id não pode ser vazio.")
+
+        self._validate_interval(interval_seconds)
+
+        with self._lock:
+            if task_id in self._tasks:
+                raise ValueError(
+                    f"Tarefa com ID '{task_id}' já está registrada."
+                )
+            now = datetime.now()
+            task = ScheduledTask(
+                task_id=task_id,
+                callback=callback,
+                interval_seconds=interval_seconds,
+                next_run=now + timedelta(seconds=interval_seconds),
+            )
+            self._tasks[task_id] = task
+
+    def remove(self, task_id: str) -> Optional[ScheduledTask]:
+        """
+        Remove uma tarefa pelo identificador.
+
+        Returns:
+            A tarefa removida, ou None se não encontrada.
+        """
+        with self._lock:
+            return self._tasks.pop(task_id, None)
+
+    def get_task(self, task_id: str) -> Optional[ScheduledTask]:
+        """Retorna uma tarefa pelo ID, sem removê-la."""
+        with self._lock:
+            return self._tasks.get(task_id)
+
+    def list_tasks(self) -> list[ScheduledTask]:
+        """Retorna uma cópia da lista de todas as tarefas registradas."""
+        with self._lock:
+            return list(self._tasks.values())
+
+    def task_exists(self, task_id: str) -> bool:
+        """Verifica se uma tarefa com o ID informado existe."""
+        with self._lock:
+            return task_id in self._tasks
+
+    # ── ciclo de vida ───────────────────────────────────────────────
+
+    def start(self) -> None:
+        """
+        Inicia o loop de execução em uma thread daemon.
+
+        Se já estiver rodando, levanta RuntimeError.
+        """
+        with self._lock:
+            if self._running:
+                raise RuntimeError("Scheduler já está em execução.")
+            self._running = True
+            self._stop_event.clear()
+
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="scheduler",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, wait: bool = True) -> None:
+        """
+        Para o loop de execução de forma segura.
+
+        Args:
+            wait: Se True, aguarda a thread finalizar.
+        """
+        self._stop_event.set()
+        with self._lock:
+            self._running = False
+        if wait and self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=10)
+
+    @property
+    def is_running(self) -> bool:
+        """Indica se o scheduler está em execução."""
+        return self._running
+
+    @property
+    def task_count(self) -> int:
+        """Número de tarefas registradas."""
+        with self._lock:
+            return len(self._tasks)
+
+    # ── loop interno ────────────────────────────────────────────────
+
+    def _run_loop(self) -> None:
+        """Loop principal que executa tarefas devidas."""
+        while not self._stop_event.is_set():
+            due = self._pop_due()
+            for task in due:
+                self._execute_task(task)
+            # Aguarda um pequeno intervalo antes de verificar novamente
+            self._stop_event.wait(0.05)
+
+    def _pop_due(self) -> list[ScheduledTask]:
+        """
+        Retorna as tarefas que estão devidas para execução.
+
+        Uma tarefa está devida quando:
+        - Nunca foi executada (last_run is None), ou
+        - O tempo desde last_run ultrapassou interval_seconds.
+
+        Atualiza last_run e next_run de cada tarefa devida.
+        """
+        now = datetime.now()
+        due: list[ScheduledTask] = []
+        with self._lock:
+            for task in list(self._tasks.values()):
+                is_due = (
+                    task.last_run is None
+                    or (now - task.last_run).total_seconds() >= task.interval_seconds
+                )
+                if is_due:
+                    task.last_run = now
+                    task.next_run = now + timedelta(seconds=task.interval_seconds)
+                    due.append(task)
+        return due
+
+    def _execute_task(self, task: ScheduledTask) -> None:
+        """
+        Executa o callback de uma tarefa, isolando erros.
+
+        Se o callback levantar exceção, ela é logada e não
+        interrompe as demais tarefas.
+        """
+        try:
+            task.callback()
+        except Exception as exc:
+            logger.error(
+                "Erro na tarefa '%s': %s", task.task_id, exc,
+            )
+
+    # ── validação ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_interval(seconds: float) -> None:
+        """
+        Valida que o intervalo em segundos é um número positivo.
+
+        Raises:
+            ValueError: Se seconds <= 0 ou não for numérico.
+        """
+        if not isinstance(seconds, (int, float)):
+            raise ValueError(
+                f"Intervalo deve ser um número, recebeu {type(seconds).__name__}."
+            )
+        if seconds <= 0:
+            raise ValueError(
+                f"Intervalo deve ser maior que zero, recebeu {seconds}."
+            )
+
+    # ── dunder ──────────────────────────────────────────────────────
+
+    def __repr__(self) -> str:
+        return (
+            f"<Scheduler running={self._running} tasks={self.task_count}>"
+        )
