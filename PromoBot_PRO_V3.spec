@@ -23,7 +23,9 @@ a = Analysis(
     binaries=[],
     # CustomTkinter carrega temas, fontes e icones em tempo de execucao.
     # Esses arquivos nao entram apenas com hiddenimports.
-    datas=browser_data + collect_data_files("customtkinter"),
+    datas=browser_data + collect_data_files("customtkinter") + [
+        ('scripts/ensure_desktop_shortcut.ps1', 'scripts'),
+    ],
     hiddenimports=[
         'customtkinter',
         'PIL',

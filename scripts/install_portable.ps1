@@ -17,20 +17,24 @@ if (-not $ResolvedSource.Equals($ResolvedTarget, [StringComparison]::OrdinalIgno
 }
 
 $Shell = New-Object -ComObject WScript.Shell
-$Desktop = [Environment]::GetFolderPath("Desktop")
 $StartMenu = [Environment]::GetFolderPath("Programs")
 
-foreach ($ShortcutPath in @(
-    (Join-Path $Desktop "PromoBot_PRO_V3.lnk"),
-    (Join-Path $StartMenu "PromoBot_PRO_V3.lnk")
-)) {
-    $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = $TargetExe
-    $Shortcut.WorkingDirectory = $TargetDir
-    $Shortcut.Description = "PromoBot_PRO V3"
-    $Shortcut.Save()
-}
+$EnsureScript = Join-Path $PSScriptRoot "ensure_desktop_shortcut.ps1"
+$ShortcutResult = & $EnsureScript `
+    -TargetPath $TargetExe `
+    -WorkingDirectory $TargetDir `
+    -IconLocation "$TargetExe,0"
+
+$StartMenuShortcut = Join-Path $StartMenu "PromoBot_PRO_V3.lnk"
+$Shortcut = $Shell.CreateShortcut($StartMenuShortcut)
+$Shortcut.TargetPath = $TargetExe
+$Shortcut.Arguments = ""
+$Shortcut.WorkingDirectory = $TargetDir
+$Shortcut.IconLocation = "$TargetExe,0"
+$Shortcut.Description = "PromoBot_PRO V3"
+$Shortcut.Save()
 
 Write-Host "PromoBot instalado em: $TargetDir"
-Write-Host "Atalhos criados na Area de Trabalho e no Menu Iniciar."
+Write-Host "Atalho da Area de Trabalho: $ShortcutResult"
+Write-Host "Atalho do Menu Iniciar atualizado."
 Write-Host "Copie seu arquivo .env para essa pasta antes de ativar notificacoes."

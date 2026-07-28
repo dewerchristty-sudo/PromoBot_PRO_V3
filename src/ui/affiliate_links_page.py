@@ -10,12 +10,13 @@ from urllib.parse import urlparse
 
 import customtkinter as ctk
 
-from src.core.notifier import Notifier
+from src.core.notifier import LowResolutionImageError, Notifier
 from src.config import ConfigValidator
 from src.scraper import Parser
 from src.stores.amazon import Amazon
 from src.stores.mercado_livre import MercadoLivre
-from src.stores.shopee import Shopee
+from src.stores.shopee import Shopee, ShopeeVariationRequired
+from src.ui.shopee_variation_dialog import request_shopee_variation
 
 
 class AffiliateLinksPage(ctk.CTkFrame):
@@ -23,6 +24,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
     MANUAL_DESTINATIONS = {
         "review": ("Revisão PromoBot", "WHATSAPP_REVIEW_GROUP"),
         "house": ("Casa & Ofertas", "WHATSAPP_GROUP_CASA_ENXOVAL"),
+        "personal": ("Meu WhatsApp", "WHATSAPP_PERSONAL_ALERT_PHONES"),
     }
     DESTINATION_SELECTED_COLOR = "#17813f"
     DESTINATION_DEFAULT_COLOR = "#1f6aa5"
@@ -128,6 +130,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
         self.only_offers = tk.BooleanVar(value=True)
         self.tested_affiliate_link = ""
         self.selected_destination = tk.StringVar(value="")
+        self.send_personal_copy = tk.BooleanVar(value=False)
         self.manual_only = bool(manual_only)
         self.shopee_manual_link = ""
         self.manual_fallback_store = ""
@@ -283,7 +286,13 @@ class AffiliateLinksPage(ctk.CTkFrame):
             row=3, column=1, sticky="ew", padx=(6, 0), pady=(0, 10)
         )
 
-        ctk.CTkLabel(self.manual_details, text="Categoria", anchor="w").grid(
+        self.manual_category_label = ctk.CTkLabel(
+            self.manual_details,
+            text="Categoria do produto",
+            anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self.manual_category_label.grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=(0, 5)
         )
         self.manual_category = ctk.CTkOptionMenu(
@@ -295,7 +304,10 @@ class AffiliateLinksPage(ctk.CTkFrame):
         )
         self.manual_category.set("Selecione a categoria")
 
-        ctk.CTkLabel(self.manual_details, text="URL da imagem", anchor="w").grid(
+        self.manual_image_label = ctk.CTkLabel(
+            self.manual_details, text="URL da imagem", anchor="w"
+        )
+        self.manual_image_label.grid(
             row=6, column=0, columnspan=2, sticky="ew", pady=(0, 5)
         )
         self.manual_image = ctk.CTkEntry(
@@ -303,6 +315,9 @@ class AffiliateLinksPage(ctk.CTkFrame):
             placeholder_text="Clique com o botao direito na imagem e copie o endereco",
         )
         self.manual_image.grid(row=7, column=0, columnspan=2, sticky="ew")
+        self.update_manual_category_visibility(
+            self.entry_mode == "Cadastro manual"
+        )
 
         ctk.CTkLabel(form, text="Etiqueta de acompanhamento", anchor="w").grid(
             row=7, column=0, sticky="ew", padx=18, pady=(0, 5)
@@ -312,24 +327,46 @@ class AffiliateLinksPage(ctk.CTkFrame):
         self.tracking_label.grid(row=8, column=0, sticky="ew", padx=18, pady=(0, 16))
         self.tracking_label.insert(0, "promobotwhatsapp")
 
-        destination_row = ctk.CTkFrame(form, fg_color="transparent")
-        destination_row.grid(
-            row=9, column=0, sticky="w", padx=18, pady=(0, 10)
+        self.destination_section = ctk.CTkFrame(form, fg_color="transparent")
+        self.destination_section.grid(
+            row=9, column=0, sticky="ew", padx=18, pady=(0, 10)
         )
+        self.destination_section.grid_columnconfigure((0, 1, 2), weight=1)
+        ctk.CTkLabel(
+            self.destination_section,
+            text="Destino principal da mensagem",
+            anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         self.review_destination_button = ctk.CTkButton(
-            destination_row,
+            self.destination_section,
             text="Revisão PromoBot",
-            width=180,
             command=lambda: self.select_manual_destination("review"),
         )
-        self.review_destination_button.pack(side="left", padx=(0, 8))
+        self.review_destination_button.grid(
+            row=1, column=0, sticky="ew", padx=(0, 4)
+        )
         self.house_destination_button = ctk.CTkButton(
-            destination_row,
+            self.destination_section,
             text="Casa & Ofertas",
-            width=180,
             command=lambda: self.select_manual_destination("house"),
         )
-        self.house_destination_button.pack(side="left")
+        self.house_destination_button.grid(
+            row=1, column=1, sticky="ew", padx=4
+        )
+        self.personal_destination_button = ctk.CTkButton(
+            self.destination_section,
+            text="Meu WhatsApp",
+            command=lambda: self.select_manual_destination("personal"),
+        )
+        self.personal_destination_button.grid(
+            row=1, column=2, sticky="ew", padx=(4, 0)
+        )
+        self.personal_copy_checkbox = ctk.CTkCheckBox(
+            self.destination_section,
+            text="Enviar também uma cópia para meu WhatsApp",
+            variable=self.send_personal_copy,
+        )
         self.update_destination_buttons()
 
         buttons = ctk.CTkFrame(form, fg_color="transparent")
@@ -394,21 +431,33 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
         if destination not in self.MANUAL_DESTINATIONS:
             raise ValueError("Destino manual inválido.")
-        self.selected_destination.set(destination)
+        current = self.selected_destination.get()
+        self.selected_destination.set("" if current == destination else destination)
+        if self.selected_destination.get() == "personal":
+            self.send_personal_copy.set(False)
         self.update_destination_buttons()
 
     def clear_manual_destination(self):
 
-        self.selected_destination.set("")
-        self.update_destination_buttons()
+        selected_destination = getattr(self, "selected_destination", None)
+        if selected_destination is not None:
+            selected_destination.set("")
+        personal_copy = getattr(self, "send_personal_copy", None)
+        if personal_copy is not None:
+            personal_copy.set(False)
+        if hasattr(self, "review_destination_button"):
+            self.update_destination_buttons()
 
     def update_destination_buttons(self):
 
         selected = self.selected_destination.get()
-        for key, button in (
+        buttons = [
             ("review", self.review_destination_button),
             ("house", self.house_destination_button),
-        ):
+        ]
+        if hasattr(self, "personal_destination_button"):
+            buttons.append(("personal", self.personal_destination_button))
+        for key, button in buttons:
             active = key == selected
             button.configure(
                 fg_color=(
@@ -420,14 +469,38 @@ class AffiliateLinksPage(ctk.CTkFrame):
                     "#ffffff" if active else self.DESTINATION_DEFAULT_COLOR
                 ),
             )
+        if not hasattr(self, "personal_copy_checkbox"):
+            return
+        if selected in {"review", "house"}:
+            self.personal_copy_checkbox.grid(
+                row=2,
+                column=0,
+                columnspan=3,
+                sticky="w",
+                pady=(9, 0),
+            )
+        else:
+            self.send_personal_copy.set(False)
+            self.personal_copy_checkbox.grid_remove()
 
     def selected_destination_config(self):
 
-        selected = self.selected_destination.get()
+        selected_variable = getattr(self, "selected_destination", None)
+        selected = selected_variable.get() if selected_variable is not None else ""
         if selected not in self.MANUAL_DESTINATIONS:
             return "", "", ""
         label, env_name = self.MANUAL_DESTINATIONS[selected]
-        return selected, label, os.getenv(env_name, "").strip()
+        configured = os.getenv(env_name, "").strip()
+        if selected == "personal":
+            configured = next(
+                (
+                    phone.strip()
+                    for phone in configured.split(",")
+                    if phone.strip()
+                ),
+                "",
+            )
+        return selected, label, configured
 
     def manual_product_data(self, link):
 
@@ -444,7 +517,12 @@ class AffiliateLinksPage(ctk.CTkFrame):
         old_price_field = getattr(self, "manual_old_price", None)
         old_price = old_price_field.get().strip() if old_price_field else ""
         image = self.manual_image.get().strip()
-        category = self.MANUAL_CATEGORIES.get(self.manual_category.get(), "")
+        category = ""
+        if getattr(self, "entry_mode", "") != "Cadastro manual":
+            category = self.MANUAL_CATEGORIES.get(
+                self.manual_category.get(),
+                "",
+            )
         current_value = Parser.price_to_float(price)
         old_value = Parser.price_to_float(old_price)
 
@@ -464,8 +542,6 @@ class AffiliateLinksPage(ctk.CTkFrame):
             )
         if not image.startswith(("http://", "https://")):
             missing.append("link da imagem")
-        if not category:
-            missing.append("categoria")
         if missing:
             raise ValueError("Complete os dados manuais: " + ", ".join(missing) + ".")
 
@@ -484,6 +560,38 @@ class AffiliateLinksPage(ctk.CTkFrame):
             "imagem": image,
             "categoria_manual": category,
         }
+
+    def select_shopee_variation(self, store, url, catalog):
+        if not catalog.get("groups"):
+            return "manual", None
+        return request_shopee_variation(
+            self,
+            catalog,
+            lambda selection: store.product_from_url(
+                url,
+                variation_selection=selection,
+            ),
+        )
+
+    def activate_shopee_manual_fallback(self, link):
+        self.clear_manual_destination()
+        self.shopee_manual_link = link
+        self.manual_fallback_store = "Shopee"
+        self.manual_details.grid(
+            row=6,
+            column=0,
+            sticky="ew",
+            padx=18,
+            pady=(0, 14),
+        )
+        self.manual_title.focus_set()
+        self.status.configure(
+            text=(
+                "Seleção de variação cancelada. Preencha os dados "
+                "manualmente e clique novamente em Salvar e notificar agora."
+            )
+        )
+        self.update_idletasks()
 
     def load_pending(self):
 
@@ -683,6 +791,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
         self.entry_mode = mode
         manual = mode == "Cadastro manual"
+        self.update_manual_category_visibility(manual)
         if manual:
             self.product_label.grid_remove()
             self.product_menu.grid_remove()
@@ -704,8 +813,56 @@ class AffiliateLinksPage(ctk.CTkFrame):
         self.ignore_button.configure(state="disabled" if manual else "normal")
         self.show_selected()
 
+    def update_manual_category_visibility(self, manual):
+        if manual:
+            self.manual_category.set("Selecione a categoria")
+            self.manual_category_label.grid_remove()
+            self.manual_category.grid_remove()
+            self.manual_image_label.grid(
+                row=4,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                pady=(0, 5),
+            )
+            self.manual_image.grid(
+                row=5,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+            )
+            return
+        self.manual_category_label.grid(
+            row=4,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 5),
+        )
+        self.manual_category.grid(
+            row=5,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 10),
+        )
+        self.manual_image_label.grid(
+            row=6,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 5),
+        )
+        self.manual_image.grid(
+            row=7,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+        )
+
     def show_selected(self):
 
+        self.clear_manual_destination()
         self.original_link.delete(0, "end")
 
         product = self.selected_product() if self.entry_mode != "Cadastro manual" else None
@@ -806,13 +963,29 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
     def save_and_notify(self):
 
+        entry_mode = getattr(self, "entry_mode", "")
+        missing_category = False
+        if entry_mode == "Oferta pendente":
+            selected = self.selected_product()
+            route = (
+                self.notifier.category_routing_diagnostic(selected)
+                if selected
+                else {}
+            )
+            missing_category = not route.get("canonical_category")
+        if missing_category:
+            messagebox.showwarning(
+                "Selecione a categoria",
+                "Selecione a categoria do produto.",
+            )
+            return
         destination_key, destination_label, destination = (
             self.selected_destination_config()
         )
         if not destination_key:
             messagebox.showwarning(
                 "Selecione o destino",
-                "Selecione Revisão PromoBot ou Casa & Ofertas antes de enviar.",
+                "Selecione o destino da mensagem.",
             )
             return
         if not destination:
@@ -906,6 +1079,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
                     shopee_blocked = False
                     mercado_livre_blocked = False
+                    import_error = None
                     if shopee_manual_active:
                         manual_product = self.manual_product_data(product["link"])
                         self.trace_manual_product(
@@ -928,6 +1102,25 @@ class AffiliateLinksPage(ctk.CTkFrame):
                                     imported["imagem"]
                                 )
                             )
+                        except LowResolutionImageError as error:
+                            if not messagebox.askyesno(
+                                "Imagem de baixa resolução",
+                                "A imagem disponível possui baixa resolução. "
+                                "Deseja continuar com o envio?",
+                            ):
+                                self.status.configure(
+                                    text=(
+                                        "Envio cancelado. Os dados preenchidos "
+                                        "foram preservados."
+                                    )
+                                )
+                                return
+                            prepared_manual_image = (
+                                self.notifier.prepare_whatsapp_image(
+                                    error.image_url,
+                                    allow_low_resolution=True,
+                                )
+                            )
                         except ValueError as error:
                             messagebox.showerror(
                                 "Imagem invalida",
@@ -937,12 +1130,35 @@ class AffiliateLinksPage(ctk.CTkFrame):
                         manual_shopee_image = True
                     else:
                         imported = self.manual_product_data(product["link"])
+                        store_importer = importer()
                         try:
                             if imported is None:
-                                imported = importer().product_from_url(
+                                imported = store_importer.product_from_url(
                                     product["link"]
                                 )
+                        except ShopeeVariationRequired as variation_error:
+                            action, variation_product = (
+                                self.select_shopee_variation(
+                                    store_importer,
+                                    product["link"],
+                                    variation_error.catalog,
+                                )
+                            )
+                            if action == "confirm":
+                                imported = variation_product
+                            elif action == "manual":
+                                self.activate_shopee_manual_fallback(
+                                    product["link"]
+                                )
+                                return
+                            else:
+                                self.clear_manual_destination()
+                                self.status.configure(
+                                    text="Seleção de variação cancelada."
+                                )
+                                return
                         except ValueError as direct_error:
+                            import_error = direct_error
                             shopee_blocked = (
                                 store_key == "shopee"
                                 and "bloqueou o acesso com pagina de verificacao"
@@ -955,10 +1171,44 @@ class AffiliateLinksPage(ctk.CTkFrame):
                                     text="Pagina direta indisponivel; tentando o link afiliado..."
                                 )
                                 self.update_idletasks()
-                                imported = importer().product_from_url(
+                                imported = store_importer.product_from_url(
                                     affiliate_url
                                 )
+                            except ShopeeVariationRequired as variation_error:
+                                action, variation_product = (
+                                    self.select_shopee_variation(
+                                        store_importer,
+                                        affiliate_url,
+                                        variation_error.catalog,
+                                    )
+                                )
+                                if action == "confirm":
+                                    imported = variation_product
+                                elif action == "manual":
+                                    self.activate_shopee_manual_fallback(
+                                        product["link"]
+                                    )
+                                    return
+                                else:
+                                    self.clear_manual_destination()
+                                    self.status.configure(
+                                        text="Seleção de variação cancelada."
+                                    )
+                                    return
                             except Exception as affiliate_error:
+                                if (
+                                    import_error is None
+                                    or any(
+                                        marker
+                                        in str(affiliate_error).casefold()
+                                        for marker in (
+                                            "faixa de pre",
+                                            "sele",
+                                            "depende da varia",
+                                        )
+                                    )
+                                ):
+                                    import_error = affiliate_error
                                 shopee_blocked = shopee_blocked or (
                                     store_key == "shopee"
                                     and "bloqueou o acesso com pagina de verificacao"
@@ -969,8 +1219,24 @@ class AffiliateLinksPage(ctk.CTkFrame):
                                     or store_key == "mercado livre"
                                 )
                                 imported = None
+                        finally:
+                            store_importer.close()
 
                     if imported is None:
+                        specific_shopee_error = (
+                            store_key == "shopee"
+                            and import_error is not None
+                            and any(
+                                marker in str(import_error).casefold()
+                                for marker in (
+                                    "faixa de pre",
+                                    "sele",
+                                    "depende da varia",
+                                )
+                            )
+                        )
+                        if specific_shopee_error:
+                            raise ValueError(str(import_error))
                         if shopee_blocked or mercado_livre_blocked:
                             self.shopee_manual_link = product["link"]
                             self.manual_fallback_store = (
@@ -1076,6 +1342,25 @@ class AffiliateLinksPage(ctk.CTkFrame):
                             manual_image_url
                         )
                     )
+                except LowResolutionImageError as error:
+                    if not messagebox.askyesno(
+                        "Imagem de baixa resolução",
+                        "A imagem disponível possui baixa resolução. "
+                        "Deseja continuar com o envio?",
+                    ):
+                        self.status.configure(
+                            text=(
+                                "Envio cancelado. Os dados preenchidos "
+                                "foram preservados."
+                            )
+                        )
+                        return
+                    prepared_manual_image = (
+                        self.notifier.prepare_whatsapp_image(
+                            error.image_url,
+                            allow_low_resolution=True,
+                        )
+                    )
                 except ValueError as error:
                     messagebox.showerror(
                         "Imagem invalida",
@@ -1090,36 +1375,6 @@ class AffiliateLinksPage(ctk.CTkFrame):
                     "apos_update_campos_tecnicos_manuais",
                     product,
                 )
-            if self.entry_mode == "Cadastro manual":
-                category = self.MANUAL_CATEGORIES.get(
-                    self.manual_category.get(), ""
-                )
-                current_category = str(
-                    product.get("categoria_manual") or ""
-                ).strip()
-                if category and category != current_category:
-                    approved = messagebox.askyesno(
-                        "Aprovar categoria para envio",
-                        "Esta categoria será associada explicitamente ao "
-                        "produto:\n\n"
-                        f"Produto: {product.get('titulo') or 'Produto'}\n"
-                        f"Loja: {product.get('loja') or 'Não informada'}\n"
-                        f"Categoria canônica: {category}\n\n"
-                        "Deseja salvar esta aprovação e continuar?",
-                    )
-                    if not approved:
-                        messagebox.showwarning(
-                            "Categoria não aprovada",
-                            self.notifier.category_block_message(product),
-                        )
-                        return
-                    product["categoria_manual"] = category
-                    self.database.salvar_produto(product)
-                    logging.getLogger(__name__).info(
-                        "category_approved_manually: store=%s category=%s",
-                        product.get("loja", ""),
-                        category,
-                    )
             self.database.salvar_link_afiliado(
                 product["loja"],
                 product["link"],
@@ -1205,6 +1460,10 @@ class AffiliateLinksPage(ctk.CTkFrame):
             product,
             destination_label,
             destination,
+            send_personal_copy=bool(
+                getattr(self, "send_personal_copy", None)
+                and self.send_personal_copy.get()
+            ),
         )
 
         if result.startswith("Enviado por:"):
@@ -1213,16 +1472,16 @@ class AffiliateLinksPage(ctk.CTkFrame):
                 product["loja"],
                 product["titulo"],
             )
-        self.show_manual_destination_result(result)
-
-        self.load_pending()
+        if self.show_manual_destination_result(result):
+            self.load_pending()
 
     def build_message_preview(self, product):
         route = self.notifier.category_routing_diagnostic(product)
+        _key, selected_label, selected_value = self.selected_destination_config()
         destination = (
-            "configurado"
-            if route["destination_configured"]
-            else "não configurado"
+            f"{selected_label} ({'configurado' if selected_value else 'não configurado'})"
+            if selected_label
+            else "nenhum destino selecionado"
         )
         return "\n".join((
             self.notifier.format_alert(product),
@@ -1230,7 +1489,15 @@ class AffiliateLinksPage(ctk.CTkFrame):
             "------------------------------",
             f"Categoria: {route['canonical_category'] or 'não detectada'}",
             f"Origem da categoria: {route['source']}",
-            f"Destino previsto: {destination}",
+            f"Destino principal: {destination}",
+            (
+                "Cópia adicional pessoal: sim"
+                if bool(
+                    getattr(self, "send_personal_copy", None)
+                    and self.send_personal_copy.get()
+                )
+                else "Cópia adicional pessoal: não"
+            ),
             f"Status do roteamento: {route['reason']}",
             "PREVIEW — nenhuma mensagem foi enviada.",
         ))
@@ -1290,6 +1557,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
         product,
         destination_label,
         destination,
+        send_personal_copy=False,
     ):
 
         product = dict(product)
@@ -1316,6 +1584,41 @@ class AffiliateLinksPage(ctk.CTkFrame):
                 or str(image or "").startswith("http")
             ):
                 return "Falha: imagem do produto não confirmada."
+            if (
+                self.notifier.evolution_configured() is True
+                and not isinstance(image, (bytes, bytearray))
+            ):
+                try:
+                    image = self.notifier.prepare_whatsapp_image(image)
+                except LowResolutionImageError as error:
+                    proceed = messagebox.askyesno(
+                        "Imagem de baixa resolução",
+                        "A imagem disponível possui baixa resolução. "
+                        "Deseja continuar com o envio?",
+                    )
+                    if not proceed:
+                        return (
+                            "Cancelado: a imagem disponível possui baixa "
+                            "resolução. Os dados foram preservados."
+                        )
+                    image = self.notifier.prepare_whatsapp_image(
+                        error.image_url,
+                        allow_low_resolution=True,
+                    )
+                except ValueError as error:
+                    return f"Falha: imagem inválida para o WhatsApp: {error}"
+
+            personal_destination = ""
+            if send_personal_copy and destination_label != "Meu WhatsApp":
+                personal_destination = next(
+                    iter(self.notifier.personal_alert_phones()),
+                    "",
+                )
+                if not personal_destination:
+                    return (
+                        "Falha: Meu WhatsApp não está configurado para "
+                        "receber a cópia adicional."
+                    )
 
             self.notifier.send_whatsapp_message(
                 self.notifier.format_alert(product),
@@ -1332,6 +1635,21 @@ class AffiliateLinksPage(ctk.CTkFrame):
                 "WhatsApp Manual",
                 destination,
             )
+            if personal_destination:
+                self.notifier.send_whatsapp_message(
+                    self.notifier.format_alert(product),
+                    image,
+                    personal_destination,
+                )
+                self.database.registrar_envio(
+                    store,
+                    title,
+                    original_link,
+                    self.notifier.affiliate_link(product),
+                    self.database.etiqueta_link_afiliado(original_link),
+                    "WhatsApp Manual",
+                    personal_destination,
+                )
             result_status = "SENT"
             return f"Enviado por: WhatsApp — {destination_label}."
         except Exception as error:
@@ -1351,6 +1669,9 @@ class AffiliateLinksPage(ctk.CTkFrame):
             messagebox.showinfo("Notificação", result)
             self.clear_manual_destination()
             return True
+        if str(result or "").startswith("Cancelado:"):
+            messagebox.showinfo("Envio cancelado", result)
+            return False
         messagebox.showerror("Falha na notificação", result)
         return False
 

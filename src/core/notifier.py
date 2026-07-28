@@ -1,3 +1,4 @@
+import base64
 import os
 import random
 import re
@@ -18,6 +19,18 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from src.stores.active import is_active_store
 
 logger = logging.getLogger(__name__)
+
+
+class LowResolutionImageError(ValueError):
+    def __init__(self, message, image_url, width, height):
+        super().__init__(message)
+        self.image_url = image_url
+        self.width = int(width)
+        self.height = int(height)
+
+
+class EvolutionSendError(RuntimeError):
+    pass
 
 
 class Notifier:
@@ -630,14 +643,7 @@ class Notifier:
 
             for channel in channels:
                 destinations = (
-                    (
-                        self.whatsapp_recipients_for_alert(alert)
-                        + (
-                            self.personal_alert_phones()
-                            if self.is_unmissable_offer(alert)
-                            else []
-                        )
-                    )
+                    self.whatsapp_recipients_for_alert(alert)
                     if channel == "WhatsApp"
                     else [os.getenv("TELEGRAM_CHAT_ID", "")]
                 )
@@ -1065,7 +1071,6 @@ class Notifier:
                 if self.evolution_configured() and imagem_preparada
                 else imagem_original
             )
-
             if not (
                 isinstance(imagem, (bytes, bytearray))
                 or str(imagem).startswith("http")
@@ -1082,23 +1087,6 @@ class Notifier:
                     continue
                 self.send_whatsapp_message(self.format_alert(item), imagem, recipient)
                 enviados += 1
-
-            # A copia pessoal nao substitui o envio aos grupos. Ela e enviada
-            # somente quando o desconto passa pelos criterios de oportunidade
-            # excepcional configurados pelo usuario.
-            if self.is_unmissable_offer(item):
-                normal_recipients = set(self.whatsapp_recipients_for_alert(item))
-                for recipient in self.personal_alert_phones():
-                    if recipient in normal_recipients:
-                        continue
-                    if self.whatsapp_group_rate_limited(recipient):
-                        continue
-                    self.send_whatsapp_message(
-                        self.format_personal_alert(item),
-                        imagem,
-                        recipient,
-                    )
-                    enviados += 1
 
         return enviados > 0
 
@@ -1204,76 +1192,97 @@ class Notifier:
             if "response" in locals():
                 response.close()
 
-    def prepare_whatsapp_image(self, image_url):
-
-        try:
-            response = requests.get(
-                str(image_url or "").strip(),
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 Chrome/124 Safari/537.36"
-                    ),
-                    "Referer": "https://shopee.com.br/",
-                    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
-                },
-                stream=True,
-                timeout=(10, 30),
+    @staticmethod
+    def best_image_url_candidates(image_url):
+        image_url = str(image_url or "").strip()
+        if not image_url:
+            return []
+        host = (urlparse(image_url).hostname or "").casefold()
+        candidates = []
+        if host == "susercontent.com" or host.endswith(".susercontent.com"):
+            original = re.sub(
+                r"@resize_[^/?#]+(?=(?:[?#]|$))",
+                "",
+                image_url,
+                count=1,
+                flags=re.IGNORECASE,
             )
-        except requests.Timeout as error:
-            raise ValueError(
-                "O download da imagem excedeu o tempo limite."
-            ) from error
-        except requests.ConnectionError as error:
-            raise ValueError(
-                "Nao foi possivel conectar ao servidor da imagem."
-            ) from error
-        except requests.RequestException as error:
-            raise ValueError(
-                f"Falha ao baixar a imagem: {error}"
-            ) from error
+            if original != image_url:
+                candidates.append(original)
+        candidates.append(image_url)
+        return list(dict.fromkeys(candidates))
 
-        try:
-            if response.status_code != 200:
-                raise ValueError(
-                    f"A imagem respondeu com HTTP {response.status_code}."
+    def download_image(self, image_url):
+        last_error = None
+        for candidate in self.best_image_url_candidates(image_url):
+            response = None
+            try:
+                response = requests.get(
+                    candidate,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                        ),
+                        "Referer": "https://shopee.com.br/",
+                        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                    },
+                    stream=True,
+                    timeout=(10, 30),
                 )
-
-            content_type = str(
-                response.headers.get("Content-Type") or ""
-            ).casefold()
-            if not content_type.startswith("image/"):
-                raise ValueError(
-                    "A URL informada nao retornou conteudo de imagem."
+                if response.status_code != 200:
+                    raise ValueError(
+                        f"A imagem respondeu com HTTP {response.status_code}."
+                    )
+                content_type = str(
+                    response.headers.get("Content-Type") or ""
+                ).casefold()
+                if not content_type.startswith("image/"):
+                    raise ValueError(
+                        "A URL informada nao retornou conteudo de imagem."
+                    )
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        declared_size = int(content_length)
+                    except (TypeError, ValueError):
+                        declared_size = 0
+                    if declared_size > self.MAX_MANUAL_IMAGE_BYTES:
+                        raise ValueError("A imagem excede o limite de 15 MiB.")
+                content = bytearray()
+                for chunk in response.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    content.extend(chunk)
+                    if len(content) > self.MAX_MANUAL_IMAGE_BYTES:
+                        raise ValueError("A imagem excede o limite de 15 MiB.")
+                if not content:
+                    raise ValueError("O arquivo de imagem esta vazio.")
+                return candidate, bytes(content)
+            except requests.Timeout as error:
+                last_error = ValueError(
+                    "O download da imagem excedeu o tempo limite."
                 )
+                last_error.__cause__ = error
+            except requests.ConnectionError as error:
+                last_error = ValueError(
+                    "Nao foi possivel conectar ao servidor da imagem."
+                )
+                last_error.__cause__ = error
+            except (requests.RequestException, ValueError) as error:
+                last_error = (
+                    error
+                    if isinstance(error, ValueError)
+                    else ValueError(f"Falha ao baixar a imagem: {error}")
+                )
+            finally:
+                if response is not None:
+                    response.close()
+        raise last_error or ValueError("Nao foi possivel baixar a imagem.")
 
-            content_length = response.headers.get("Content-Length")
-            if content_length:
-                try:
-                    declared_size = int(content_length)
-                except (TypeError, ValueError):
-                    declared_size = 0
-                if declared_size > self.MAX_MANUAL_IMAGE_BYTES:
-                    raise ValueError(
-                        "A imagem excede o limite de 15 MiB."
-                    )
+    def prepare_whatsapp_image(self, image_url, allow_low_resolution=False):
 
-            content = bytearray()
-            for chunk in response.iter_content(64 * 1024):
-                if not chunk:
-                    continue
-                content.extend(chunk)
-                if len(content) > self.MAX_MANUAL_IMAGE_BYTES:
-                    raise ValueError(
-                        "A imagem excede o limite de 15 MiB."
-                    )
-
-            if not content:
-                raise ValueError("O arquivo de imagem esta vazio.")
-        finally:
-            response.close()
-
-        original = bytes(content)
+        resolved_url, original = self.download_image(image_url)
         try:
             image = Image.open(BytesIO(original))
             image.load()
@@ -1293,12 +1302,16 @@ class Notifier:
             width < self.MIN_MANUAL_IMAGE_WIDTH
             or height < self.MIN_MANUAL_IMAGE_HEIGHT
         ):
-            raise ValueError(
+            error = LowResolutionImageError(
                 f"A imagem possui {width} x {height} pixels.\n\n"
                 "O minimo recomendado e 500 x 500 pixels para garantir "
-                "boa qualidade no WhatsApp.\n\n"
-                "Escolha outra imagem."
+                "boa qualidade no WhatsApp.",
+                resolved_url,
+                width,
+                height,
             )
+            if not allow_low_resolution:
+                raise error
 
         if original_format == "JPEG":
             return original
@@ -1760,68 +1773,83 @@ class Notifier:
 
     def send_evolution_image(self, message, image_url, phone):
 
+        if (
+            not isinstance(image_url, (bytes, bytearray))
+            and str(image_url or "").startswith("http")
+        ):
+            image_url = self.prepare_whatsapp_image(image_url)
         api_url = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
         instance = os.getenv("EVOLUTION_INSTANCE")
         api_key = os.getenv("EVOLUTION_API_KEY")
         endpoint = f"{api_url}/message/sendMedia/{instance}"
         diagnostic_logger = self.evolution_diagnostic_logger()
-
+        destination = str(phone or "")
+        masked_destination = self.mask_evolution_destination(destination)
+        self.validate_evolution_destination(destination)
+        connected, connection_state = self.whatsapp_connection_health()
+        if not connected:
+            raise EvolutionSendError(
+                "A instância da Evolution não está conectada "
+                f"(estado: {connection_state})."
+            )
+        media_diagnostic = {
+            "source": (
+                "arquivo_validado"
+                if isinstance(image_url, (bytes, bytearray))
+                else "url_original"
+            ),
+            "file_name": "produto.jpg",
+            "format": "desconhecido",
+            "content_type": "application/json",
+            "mime_type": "desconhecido",
+            "width": 0,
+            "height": 0,
+            "size_bytes": (
+                len(image_url)
+                if isinstance(image_url, (bytes, bytearray))
+                else 0
+            ),
+        }
         if isinstance(image_url, (bytes, bytearray)):
-            request_kwargs = {
-                "data": {
-                    "number": phone,
-                    "mediatype": "image",
-                    "caption": message[:1000],
-                    "fileName": "produto.jpg",
-                },
-                "files": {
-                    "media": (
-                        "produto.jpg",
-                        bytes(image_url),
-                        "image/jpeg",
-                    )
-                },
-                "headers": {"apikey": api_key},
-                "timeout": 30,
-            }
-            diagnostic_payload = {
-                **request_kwargs["data"],
-                "media": {
-                    "fileName": "produto.jpg",
-                    "mimetype": "image/jpeg",
-                    "size_bytes": len(image_url),
-                },
-                "headers": {"apikey": "<redacted>"},
-            }
+            media_bytes, detected = self.validate_evolution_media(
+                bytes(image_url),
+                "image/jpeg",
+            )
+            media_diagnostic.update(detected)
+            media_value = base64.b64encode(media_bytes).decode("ascii")
         else:
-            request_kwargs = {
-                "json": {
-                    "number": phone,
-                    "mediatype": "image",
-                    "mimetype": "image/jpeg",
-                    "caption": message[:1000],
-                    "media": image_url,
-                    "fileName": "produto.jpg",
-                    "linkPreview": True,
-                },
-                "headers": {
-                    "apikey": api_key,
-                    "Content-Type": "application/json",
-                },
-                "timeout": 30,
-            }
-            diagnostic_payload = {
-                **request_kwargs["json"],
-                "headers": {
-                    "apikey": "<redacted>",
-                    "Content-Type": "application/json",
-                },
-            }
+            raise EvolutionSendError(
+                "O arquivo de imagem não foi preparado para o envio."
+            )
+
+        request_kwargs = {
+            "json": {
+                "number": phone,
+                "mediatype": "image",
+                "mimetype": media_diagnostic["mime_type"],
+                "caption": message[:1000],
+                "media": media_value,
+                "fileName": media_diagnostic["file_name"],
+            },
+            "headers": {
+                "apikey": api_key,
+                "Content-Type": "application/json",
+            },
+            "timeout": 30,
+        }
 
         diagnostic_logger.warning(
-            "Evolution API diagnostico temporario: POST %s payload=%r",
+            "Evolution API: status_http=pendente endpoint=%s "
+            "content_type=%s file_name=%s size_bytes=%s format=%s "
+            "dimensions=%sx%s destination=%s",
             endpoint,
-            diagnostic_payload,
+            media_diagnostic["content_type"],
+            media_diagnostic["file_name"],
+            media_diagnostic["size_bytes"],
+            media_diagnostic["format"],
+            media_diagnostic["width"],
+            media_diagnostic["height"],
+            masked_destination,
         )
         response = None
         try:
@@ -1834,21 +1862,21 @@ class Notifier:
             except ValueError:
                 response_json = None
             diagnostic_logger.warning(
-                "Evolution API diagnostico temporario: "
-                "status_code=%s response_text=%r response_json=%r",
+                "Evolution API: destination=%s status_code=%s response=%r",
+                masked_destination,
                 response.status_code,
-                response.text,
-                response_json,
+                self.summarize_evolution_response(response, response_json),
             )
             response.raise_for_status()
             return True
-        except Exception:
+        except requests.HTTPError as error:
             if response is None:
                 diagnostic_logger.exception(
-                    "Evolution API diagnostico temporario: falha antes de "
-                    "receber resposta. endpoint=%s payload=%r",
+                    "Evolution API: falha antes da resposta destination=%s "
+                    "endpoint=%s media=%r",
+                    masked_destination,
                     endpoint,
-                    diagnostic_payload,
+                    media_diagnostic,
                 )
             else:
                 try:
@@ -1856,16 +1884,131 @@ class Notifier:
                 except ValueError:
                     response_json = None
                 diagnostic_logger.exception(
-                    "Evolution API diagnostico temporario: HTTP/falha no "
-                    "processamento. endpoint=%s status_code=%s "
-                    "response_text=%r response_json=%r payload=%r",
+                    "Evolution API: falha HTTP destination=%s endpoint=%s "
+                    "status_code=%s response=%r media=%r",
+                    masked_destination,
                     endpoint,
                     response.status_code,
-                    response.text,
-                    response_json,
-                    diagnostic_payload,
+                    self.summarize_evolution_response(response, response_json),
+                    media_diagnostic,
                 )
+            summary = self.summarize_evolution_response(
+                response,
+                response_json,
+            )
+            technical_cause = (
+                summary.get("message")
+                or summary.get("error")
+                or summary.get("text")
+                or "erro interno sem detalhes"
+            )
+            raise EvolutionSendError(
+                "A Evolution recusou o envio da imagem "
+                f"(HTTP {response.status_code}: {technical_cause}). "
+                "Os dados foram preservados."
+            ) from error
+        except Exception:
+            diagnostic_logger.exception(
+                "Evolution API: falha antes da resposta destination=%s "
+                "endpoint=%s media=%r",
+                masked_destination,
+                endpoint,
+                media_diagnostic,
+            )
             raise
+
+    @staticmethod
+    def mask_evolution_destination(destination):
+        destination = str(destination or "")
+        suffix = "@g.us" if destination.endswith("@g.us") else ""
+        digits = re.sub(r"\D", "", destination)
+        if not digits:
+            return "nao informado"
+        return f"***{digits[-4:]}{suffix}"
+
+    @staticmethod
+    def validate_evolution_destination(destination):
+        destination = str(destination or "").strip()
+        if destination.endswith("@g.us"):
+            if re.fullmatch(r"\d{10,22}@g\.us", destination):
+                return True
+        elif re.fullmatch(r"\d{12,13}", destination):
+            return True
+        raise EvolutionSendError(
+            "O destino configurado para a Evolution é inválido."
+        )
+
+    @staticmethod
+    def validate_evolution_media(content, declared_mime):
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            raise EvolutionSendError(
+                "O arquivo de imagem está vazio ou não existe."
+            )
+        try:
+            with Image.open(BytesIO(bytes(content))) as inspected:
+                inspected.verify()
+            with Image.open(BytesIO(bytes(content))) as inspected:
+                detected_format = str(inspected.format or "").upper()
+                width, height = inspected.size
+        except (UnidentifiedImageError, OSError) as error:
+            raise EvolutionSendError(
+                "O arquivo de imagem não pode ser aberto pelo Pillow."
+            ) from error
+        format_mimes = {
+            "JPEG": "image/jpeg",
+            "PNG": "image/png",
+            "WEBP": "image/webp",
+        }
+        detected_mime = format_mimes.get(detected_format)
+        if not detected_mime or detected_mime != declared_mime:
+            raise EvolutionSendError(
+                "O MIME informado não corresponde ao formato real do arquivo."
+            )
+        return bytes(content), {
+            "format": detected_format.lower(),
+            "mime_type": detected_mime,
+            "width": width,
+            "height": height,
+            "size_bytes": len(content),
+        }
+
+    @staticmethod
+    def summarize_evolution_response(response, response_json):
+        if isinstance(response_json, dict):
+            summary = {
+                key: (
+                    response_json.get(key)
+                    if key == "status"
+                    else Notifier.sanitize_evolution_text(
+                        response_json.get(key)
+                    )
+                )
+                for key in ("status", "error")
+                if response_json.get(key) is not None
+            }
+            nested = response_json.get("response")
+            if isinstance(nested, dict) and nested.get("message"):
+                summary["message"] = Notifier.sanitize_evolution_text(
+                    nested["message"]
+                )
+            return summary or {"result": "resposta JSON recebida"}
+        return {
+            "text": Notifier.sanitize_evolution_text(
+                getattr(response, "text", "") or ""
+            )
+        }
+
+    @staticmethod
+    def sanitize_evolution_text(value):
+        text = str(value or "").replace("\r", " ").replace("\n", " ")
+        text = re.sub(
+            r"(?i)\b(api[-_ ]?key|token|authorization|caption)"
+            r"\b\s*[:=]\s*[^,;\s]+",
+            r"\1=[REMOVIDO]",
+            text,
+        )
+        text = re.sub(r"\b\d{10,22}(?:@g\.us)?\b", "***[DESTINO]", text)
+        return text[:200]
 
     def send_zapi_image(self, message, image_url, phone):
 

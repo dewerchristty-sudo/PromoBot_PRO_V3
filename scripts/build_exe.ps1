@@ -51,5 +51,11 @@ foreach ($FileName in @(".env", "promobot.db")) {
     }
 }
 
+$ShortcutResult = & ".\scripts\ensure_desktop_shortcut.ps1" `
+    -TargetPath (Join-Path $DistDir "PromoBot_PRO_V3.exe") `
+    -WorkingDirectory $DistDir `
+    -IconLocation "$(Join-Path $DistDir 'PromoBot_PRO_V3.exe'),0"
+
 Write-Host ""
 Write-Host "Build concluido. Executavel em: dist\PromoBot_PRO_V3\PromoBot_PRO_V3.exe"
+Write-Host "Atalho PromoBot_PRO_V3.lnk: $ShortcutResult"

@@ -129,16 +129,13 @@ class CategorySafetyTest(unittest.TestCase):
                 self.assertIn(link, preview)
                 self.assertIn("PREVIEW", preview)
 
-    def test_codigo_exige_confirmacao_separada_para_persistir_categoria(self):
+    def test_cadastro_manual_nao_persiste_categoria_oculta(self):
         source = __import__(
             "pathlib"
         ).Path("src/ui/affiliate_links_page.py").read_text(encoding="utf-8")
-        self.assertIn("Aprovar categoria para envio", source)
-        self.assertIn("category_approved_manually", source)
-        self.assertLess(
-            source.index("Aprovar categoria para envio"),
-            source.index("Confirmar envio manual"),
-        )
+        self.assertNotIn("Aprovar categoria para envio", source)
+        self.assertNotIn("category_approved_manually", source)
+        self.assertIn("update_manual_category_visibility", source)
 
 
 if __name__ == "__main__":

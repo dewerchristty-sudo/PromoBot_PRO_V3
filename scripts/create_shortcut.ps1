@@ -7,14 +7,10 @@ if (-not (Test-Path $ExePath)) {
     throw "Executavel nao encontrado. Rode .\scripts\build_exe.ps1 primeiro."
 }
 
-$Desktop = [Environment]::GetFolderPath("Desktop")
-$ShortcutPath = Join-Path $Desktop "PromoBot_PRO_V3.lnk"
+$EnsureScript = Join-Path $PSScriptRoot "ensure_desktop_shortcut.ps1"
+$Result = & $EnsureScript `
+    -TargetPath $ExePath `
+    -WorkingDirectory (Split-Path -Parent $ExePath) `
+    -IconLocation "$ExePath,0"
 
-$Shell = New-Object -ComObject WScript.Shell
-$Shortcut = $Shell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = $ExePath
-$Shortcut.WorkingDirectory = Split-Path -Parent $ExePath
-$Shortcut.Description = "PromoBot_PRO V3"
-$Shortcut.Save()
-
-Write-Host "Atalho criado em: $ShortcutPath"
+Write-Host "Atalho PromoBot_PRO_V3.lnk: $Result"

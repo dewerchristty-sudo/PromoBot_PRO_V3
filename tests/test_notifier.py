@@ -1,3 +1,4 @@
+import base64
 import unittest
 from io import BytesIO
 from unittest.mock import patch
@@ -6,7 +7,7 @@ from unittest.mock import Mock
 import requests
 from PIL import Image
 
-from src.core.notifier import Notifier
+from src.core.notifier import EvolutionSendError, Notifier
 
 
 class NotifierTest(unittest.TestCase):
@@ -85,6 +86,32 @@ class NotifierTest(unittest.TestCase):
             Notifier().prepare_whatsapp_image("https://example.com/pequena.png")
 
     @patch("src.core.notifier.requests.get")
+    def test_permite_imagem_pequena_somente_apos_confirmacao(self, get):
+        source = self.image_bytes("PNG", size=(320, 480))
+        get.return_value = self.image_response(source, "image/png")
+
+        prepared = Notifier().prepare_whatsapp_image(
+            "https://example.com/pequena.png",
+            allow_low_resolution=True,
+        )
+
+        self.assertEqual(Image.open(BytesIO(prepared)).size, (320, 480))
+
+    def test_prefere_original_seguro_antes_da_variante_redimensionada(self):
+        url = (
+            "https://down-br.img.susercontent.com/file/foto"
+            "@resize_w900_nl.webp"
+        )
+
+        self.assertEqual(
+            Notifier.best_image_url_candidates(url),
+            [
+                "https://down-br.img.susercontent.com/file/foto",
+                url,
+            ],
+        )
+
+    @patch("src.core.notifier.requests.get")
     def test_rejeita_conteudo_que_nao_e_imagem(self, get):
 
         get.return_value = self.image_response(b"<html>erro</html>", "text/html")
@@ -132,21 +159,118 @@ class NotifierTest(unittest.TestCase):
         "EVOLUTION_API_KEY": "token",
     }, clear=False)
     @patch("src.core.notifier.requests.post")
-    def test_evolution_envia_jpeg_com_multipart(self, post):
+    def test_evolution_envia_jpeg_com_json_base64(self, post):
 
         post.return_value.raise_for_status.return_value = None
         content = self.image_bytes("JPEG")
 
-        Notifier().send_evolution_image("Oferta", content, "grupo@g.us")
+        Notifier().send_evolution_image(
+            "Oferta",
+            content,
+            "120363408335461860@g.us",
+        )
 
         kwargs = post.call_args.kwargs
+        self.assertNotIn("data", kwargs)
+        self.assertNotIn("files", kwargs)
+        self.assertEqual(kwargs["json"]["mediatype"], "image")
+        self.assertEqual(kwargs["json"]["mimetype"], "image/jpeg")
         self.assertEqual(
-            set(kwargs["data"]),
-            {"number", "mediatype", "caption", "fileName"},
+            base64.b64decode(kwargs["json"]["media"]),
+            content,
         )
-        self.assertEqual(kwargs["data"]["mediatype"], "image")
-        self.assertEqual(kwargs["files"]["media"][2], "image/jpeg")
-        self.assertNotIn("Content-Type", kwargs["headers"])
+        self.assertEqual(kwargs["headers"]["Content-Type"], "application/json")
+
+    def test_evolution_bloqueia_instancia_desconectada(self):
+        notifier = Notifier()
+        notifier.whatsapp_connection_health = Mock(
+            return_value=(False, "close")
+        )
+
+        with self.assertRaisesRegex(EvolutionSendError, "não está conectada"):
+            notifier.send_evolution_image(
+                "Oferta",
+                self.image_bytes("JPEG"),
+                "5511999999999",
+            )
+
+    def test_evolution_rejeita_destino_invalido(self):
+        with self.assertRaisesRegex(EvolutionSendError, "destino.*inválido"):
+            Notifier().send_evolution_image(
+                "Oferta",
+                self.image_bytes("JPEG"),
+                "grupo@g.us",
+            )
+
+    def test_evolution_rejeita_arquivo_vazio(self):
+        with self.assertRaisesRegex(EvolutionSendError, "vazio ou não existe"):
+            Notifier().send_evolution_image(
+                "Oferta",
+                b"",
+                "5511999999999",
+            )
+
+    def test_evolution_rejeita_mime_incorreto(self):
+        with self.assertRaisesRegex(EvolutionSendError, "MIME"):
+            Notifier.validate_evolution_media(
+                self.image_bytes("PNG"),
+                "image/jpeg",
+            )
+
+    @patch.dict("os.environ", {
+        "EVOLUTION_API_URL": "http://localhost:8080",
+        "EVOLUTION_INSTANCE": "promobot",
+        "EVOLUTION_API_KEY": "token",
+    }, clear=False)
+    @patch("src.core.notifier.requests.post")
+    def test_evolution_http_500_json_exibe_causa_sanitizada(self, post):
+        response = Mock()
+        response.status_code = 500
+        response.json.return_value = {
+            "status": 500,
+            "error": "Internal Server Error",
+            "response": {"message": "Unexpected field"},
+        }
+        response.raise_for_status.side_effect = requests.HTTPError(
+            response=response
+        )
+        post.return_value = response
+
+        with self.assertRaisesRegex(
+            EvolutionSendError,
+            "HTTP 500: Unexpected field",
+        ):
+            Notifier().send_evolution_image(
+                "legenda sensível",
+                self.image_bytes("JPEG"),
+                "5511999999999",
+            )
+
+    @patch.dict("os.environ", {
+        "EVOLUTION_API_URL": "http://localhost:8080",
+        "EVOLUTION_INSTANCE": "promobot",
+        "EVOLUTION_API_KEY": "token",
+    }, clear=False)
+    @patch("src.core.notifier.requests.post")
+    def test_evolution_http_500_texto_exibe_causa(self, post):
+        response = Mock()
+        response.status_code = 500
+        response.json.side_effect = ValueError()
+        response.text = "falha ao decodificar imagem"
+        response.raise_for_status.side_effect = requests.HTTPError(
+            response=response
+        )
+        post.return_value = response
+
+        with self.assertRaisesRegex(
+            EvolutionSendError,
+            "HTTP 500: falha ao decodificar imagem",
+        ):
+            Notifier().send_evolution_image(
+                "Oferta",
+                self.image_bytes("JPEG"),
+                "5511999999999",
+            )
 
     def test_outros_canais_preservam_url_original(self):
 
@@ -273,6 +397,12 @@ class NotifierTest(unittest.TestCase):
 
     def setUp(self):
 
+        self.connection_patch = patch.object(
+            Notifier,
+            "whatsapp_connection_health",
+            return_value=(True, "open"),
+        )
+        self.connection_patch.start()
         self.notification_stores_patch = patch.dict(
             "os.environ",
             {
@@ -304,6 +434,7 @@ class NotifierTest(unittest.TestCase):
     def tearDown(self):
 
         self.notification_stores_patch.stop()
+        self.connection_patch.stop()
 
     @patch.dict("os.environ", {
         "WHATSAPP_PERSONAL_ALERT_PHONES": "5527996703669",
@@ -339,7 +470,7 @@ class NotifierTest(unittest.TestCase):
         "verified_whatsapp_image",
         return_value="https://example.com/product.jpg",
     )
-    def test_oferta_imperdivel_vai_ao_grupo_e_ao_numero_pessoal(
+    def test_oferta_imperdivel_nao_envia_copia_pessoal_automatica(
         self, _verified_image
     ):
 
@@ -360,11 +491,7 @@ class NotifierTest(unittest.TestCase):
             call.args[2]
             for call in notifier.send_whatsapp_message.call_args_list
         ]
-        self.assertEqual(recipients, ["grupo@g.us", "5527996703669"])
-        self.assertIn(
-            "OFERTA IMPERDIVEL",
-            notifier.send_whatsapp_message.call_args_list[1].args[0],
-        )
+        self.assertEqual(recipients, ["grupo@g.us"])
 
     def test_sem_alertas_nao_envia(self):
 
@@ -707,6 +834,9 @@ class NotifierTest(unittest.TestCase):
         post.return_value = response
 
         notifier = Notifier()
+        notifier.prepare_whatsapp_image = Mock(
+            return_value=self.image_bytes("JPEG")
+        )
         resultado = notifier.send_alerts([
             {
                 "termo": "ssd",
@@ -773,6 +903,9 @@ class NotifierTest(unittest.TestCase):
         post.return_value = response
 
         notifier = Notifier()
+        notifier.prepare_whatsapp_image = Mock(
+            return_value=self.image_bytes("JPEG")
+        )
         resultado = notifier.send_alerts([
             {
                 "termo": "ssd",
@@ -938,6 +1071,9 @@ class NotifierTest(unittest.TestCase):
         post.return_value = response
 
         notifier = Notifier()
+        notifier.prepare_whatsapp_image = Mock(
+            return_value=self.image_bytes("JPEG")
+        )
         resultado = notifier.send_alerts([
             {
                 "termo": "ssd",
@@ -988,7 +1124,11 @@ class NotifierTest(unittest.TestCase):
         response.raise_for_status.return_value = None
         post.return_value = response
 
-        resultado = Notifier().send_alerts([
+        notifier = Notifier()
+        notifier.prepare_whatsapp_image = Mock(
+            return_value=self.image_bytes("JPEG")
+        )
+        resultado = notifier.send_alerts([
             {
                 "termo": "fone",
                 "preco_alvo": None,
@@ -1256,7 +1396,11 @@ class NotifierTest(unittest.TestCase):
             }
         ]
 
-        resultado = Notifier().send_alerts(alerts, database)
+        notifier = Notifier()
+        notifier.prepare_whatsapp_image = Mock(
+            return_value=self.image_bytes("JPEG")
+        )
+        resultado = notifier.send_alerts(alerts, database)
 
         self.assertEqual(resultado, "Enviado por: WhatsApp")
         database.marcar_notificacoes_enviadas.assert_called_once_with(alerts)
@@ -1279,7 +1423,11 @@ class NotifierTest(unittest.TestCase):
         database = Mock()
         database.registrar_envio.side_effect = RuntimeError("banco indisponivel")
 
-        result = Notifier(database).send_alerts([{
+        notifier = Notifier(database)
+        notifier.prepare_whatsapp_image = Mock(
+            return_value=self.image_bytes("JPEG")
+        )
+        result = notifier.send_alerts([{
             "loja": "Amazon",
             "link_afiliado_salvo": "https://amzn.to/teste",
             "titulo": "Produto enviado",

@@ -16,6 +16,71 @@ class AffiliateLinksPageTest(unittest.TestCase):
         )()
         return page
 
+    @patch(
+        "src.ui.affiliate_links_page.request_shopee_variation",
+        return_value=("cancel", None),
+    )
+    def test_selecao_shopee_permite_cancelamento(self, request):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        store = Mock()
+        result = page.select_shopee_variation(
+            store,
+            "https://shopee.com.br/produto-i.1.2",
+            {"groups": [{"name": "Cor", "options": ["Azul"]}]},
+        )
+        self.assertEqual(result, ("cancel", None))
+        request.assert_called_once()
+
+    @patch(
+        "src.ui.affiliate_links_page.request_shopee_variation",
+        return_value=("manual", None),
+    )
+    def test_selecao_shopee_permite_preenchimento_manual(self, _request):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        self.assertEqual(
+            page.select_shopee_variation(
+                Mock(),
+                "https://shopee.com.br/produto-i.1.2",
+                {"groups": [{"name": "Cor", "options": ["Azul"]}]},
+            ),
+            ("manual", None),
+        )
+
+    @patch("src.ui.affiliate_links_page.request_shopee_variation")
+    def test_preview_aplica_selecao_no_scraper(self, request):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        store = Mock()
+
+        def invoke(_master, _catalog, callback):
+            product = callback({"Cor": "Rosa"})
+            return "confirm", product
+
+        request.side_effect = invoke
+        store.product_from_url.return_value = {"preco": "25,98"}
+        result = page.select_shopee_variation(
+            store,
+            "https://shopee.com.br/produto-i.1.2",
+            {"groups": [{"name": "Cor", "options": ["Rosa"]}]},
+        )
+        self.assertEqual(result, ("confirm", {"preco": "25,98"}))
+        store.product_from_url.assert_called_once_with(
+            "https://shopee.com.br/produto-i.1.2",
+            variation_selection={"Cor": "Rosa"},
+        )
+
+    def test_ativa_fallback_manual_da_variacao(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.manual_details = Mock()
+        page.manual_title = Mock()
+        page.status = Mock()
+        page.update_idletasks = Mock()
+        link = "https://shopee.com.br/produto-i.1.2"
+        page.activate_shopee_manual_fallback(link)
+        self.assertEqual(page.shopee_manual_link, link)
+        self.assertEqual(page.manual_fallback_store, "Shopee")
+        page.manual_details.grid.assert_called_once()
+        page.manual_title.focus_set.assert_called_once()
+
     def test_aceita_link_curto_oficial_link_amazon(self):
 
         page = AffiliateLinksPage.__new__(AffiliateLinksPage)
@@ -219,6 +284,147 @@ class AffiliateLinksPageTest(unittest.TestCase):
 
         self.assertEqual(product["preco"], "48,90")
         self.assertEqual(product["preco_antigo"], "79,90")
+
+    def test_cadastro_manual_monta_produto_sem_categoria(self):
+        page, link = self.shopee_manual_page("48,90", "79,90")
+        page.manual_category = type(
+            "Field",
+            (),
+            {"get": lambda self: "Selecione a categoria"},
+        )()
+
+        product = page.manual_product_data(link)
+
+        self.assertEqual(product["categoria_manual"], "")
+
+    def test_seletor_categoria_oculto_no_cadastro_manual(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.manual_category = Mock()
+        page.manual_category_label = Mock()
+        page.manual_image_label = Mock()
+        page.manual_image = Mock()
+
+        page.update_manual_category_visibility(True)
+
+        page.manual_category_label.grid_remove.assert_called_once()
+        page.manual_category.grid_remove.assert_called_once()
+        self.assertEqual(
+            page.manual_image_label.grid.call_args.kwargs["row"],
+            4,
+        )
+        self.assertEqual(page.manual_image.grid.call_args.kwargs["row"], 5)
+
+    def test_seletor_categoria_visivel_em_oferta_pendente(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.manual_category = Mock()
+        page.manual_category_label = Mock()
+        page.manual_image_label = Mock()
+        page.manual_image = Mock()
+
+        page.update_manual_category_visibility(False)
+
+        self.assertEqual(
+            page.manual_category_label.grid.call_args.kwargs["row"],
+            4,
+        )
+        self.assertEqual(page.manual_category.grid.call_args.kwargs["row"], 5)
+        self.assertEqual(page.manual_image.grid.call_args.kwargs["row"], 7)
+
+    def test_cadastro_manual_nao_consulta_seletor_de_categoria(self):
+        page, link = self.shopee_manual_page("48,90", "79,90")
+        page.manual_category = Mock()
+        page.manual_category.get.side_effect = AssertionError(
+            "seletor oculto nao pode ser consultado"
+        )
+
+        product = page.manual_product_data(link)
+
+        self.assertEqual(product["categoria_manual"], "")
+        page.manual_category.get.assert_not_called()
+
+    def test_ausencia_imagem_mantem_erro_especifico(self):
+        page, link = self.shopee_manual_page("48,90", "79,90")
+        page.manual_image = type(
+            "Field",
+            (),
+            {"get": lambda self: ""},
+        )()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Complete os dados manuais: link da imagem\.",
+        ):
+            page.manual_product_data(link)
+
+    def test_entrada_no_cadastro_manual_limpa_categoria_anterior(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.manual_category = Mock()
+        page.manual_category_label = Mock()
+        page.manual_image_label = Mock()
+        page.manual_image = Mock()
+
+        page.update_manual_category_visibility(True)
+
+        page.manual_category.set.assert_called_once_with(
+            "Selecione a categoria"
+        )
+
+    @patch("src.ui.affiliate_links_page.messagebox")
+    def test_cadastro_manual_notifica_sem_exigir_categoria(self, messagebox):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.entry_mode = "Cadastro manual"
+        page.manual_category = type(
+            "Field",
+            (),
+            {"get": lambda self: "Selecione a categoria"},
+        )()
+        page.selected_destination_config = Mock(
+            return_value=("review", "Revisão PromoBot", "review@g.us")
+        )
+        page.save_selected_link = Mock(return_value=None)
+
+        page.save_and_notify()
+
+        page.save_selected_link.assert_called_once()
+        messagebox.showwarning.assert_not_called()
+
+    @patch("src.ui.affiliate_links_page.messagebox")
+    def test_cadastro_manual_com_categoria_continua_funcionando(self, messagebox):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.entry_mode = "Cadastro manual"
+        page.manual_category = type(
+            "Field",
+            (),
+            {"get": lambda self: "Smartphones e Tecnologia"},
+        )()
+        page.selected_destination_config = Mock(
+            return_value=("review", "Revisão PromoBot", "review@g.us")
+        )
+        page.save_selected_link = Mock(return_value=None)
+
+        page.save_and_notify()
+
+        page.save_selected_link.assert_called_once()
+        messagebox.showwarning.assert_not_called()
+
+    @patch("src.ui.affiliate_links_page.messagebox")
+    def test_oferta_pendente_continua_bloqueada_sem_categoria(self, messagebox):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.entry_mode = "Oferta pendente"
+        page.selected_product = Mock(return_value={"titulo": "Produto"})
+        page.notifier = Mock()
+        page.notifier.category_routing_diagnostic.return_value = {
+            "canonical_category": ""
+        }
+        page.save_selected_link = Mock()
+
+        page.save_and_notify()
+
+        page.save_selected_link.assert_not_called()
+        messagebox.showwarning.assert_called_once_with(
+            "Selecione a categoria",
+            "Selecione a categoria do produto.",
+        )
 
     @patch("src.ui.affiliate_links_page.messagebox.showinfo")
     @patch("src.ui.affiliate_links_page.messagebox.showerror")

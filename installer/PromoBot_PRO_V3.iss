@@ -32,9 +32,6 @@ VersionInfoCompany={#AppPublisher}
 [Languages]
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 
-[Tasks]
-Name: "desktopicon"; Description: "Criar um atalho na área de trabalho"; GroupDescription: "Atalhos:"; Flags: checkedonce
-
 [Files]
 Source: "..\dist_veloz\PromoBot_PRO_V3\PromoBot_PRO_V3.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist_veloz\PromoBot_PRO_V3\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -44,12 +41,13 @@ Source: "templates\evolution.env.template"; DestDir: "{app}\installer"; Flags: i
 Source: "initialize_install.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "..\scripts\promobot_supervisor.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\scripts\install_promobot_supervisor.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "..\scripts\ensure_desktop_shortcut.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\scripts\ensure_desktop_shortcut.ps1"" -TargetPath ""{app}\{#AppExeName}"" -WorkingDirectory ""{app}"" -IconLocation ""{app}\{#AppExeName},0"""; Flags: runhidden waituntilterminated; StatusMsg: "Atualizando atalho do PromoBot..."
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\installer\initialize_install.ps1"" -AppDirectory ""{app}"""; Flags: runhidden waituntilterminated; StatusMsg: "Criando configurações seguras..."
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\scripts\install_promobot_supervisor.ps1"" -PromoBotExe ""{app}\{#AppExeName}"""; Flags: runhidden waituntilterminated; StatusMsg: "Configurando inicialização em segundo plano..."; Check: ShouldInstallSupervisor
 Filename: "{app}\{#AppExeName}"; Description: "Abrir o {#AppName}"; Flags: nowait postinstall skipifsilent
