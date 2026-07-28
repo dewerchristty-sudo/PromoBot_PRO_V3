@@ -2,6 +2,7 @@ import tkinter as tk
 import threading
 import webbrowser
 import logging
+import os
 import sys
 from tkinter import messagebox
 from pathlib import Path
@@ -18,6 +19,13 @@ from src.stores.shopee import Shopee
 
 
 class AffiliateLinksPage(ctk.CTkFrame):
+
+    MANUAL_DESTINATIONS = {
+        "review": ("Revisão PromoBot", "WHATSAPP_REVIEW_GROUP"),
+        "house": ("Casa & Ofertas", "WHATSAPP_GROUP_CASA_ENXOVAL"),
+    }
+    DESTINATION_SELECTED_COLOR = "#17813f"
+    DESTINATION_DEFAULT_COLOR = "#1f6aa5"
 
     MANUAL_CATEGORIES = {
         "Selecione a categoria": "",
@@ -119,6 +127,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
         self.pending_by_label = {}
         self.only_offers = tk.BooleanVar(value=True)
         self.tested_affiliate_link = ""
+        self.selected_destination = tk.StringVar(value="")
         self.manual_only = bool(manual_only)
         self.shopee_manual_link = ""
         self.manual_fallback_store = ""
@@ -303,12 +312,32 @@ class AffiliateLinksPage(ctk.CTkFrame):
         self.tracking_label.grid(row=8, column=0, sticky="ew", padx=18, pady=(0, 16))
         self.tracking_label.insert(0, "promobotwhatsapp")
 
+        destination_row = ctk.CTkFrame(form, fg_color="transparent")
+        destination_row.grid(
+            row=9, column=0, sticky="w", padx=18, pady=(0, 10)
+        )
+        self.review_destination_button = ctk.CTkButton(
+            destination_row,
+            text="Revisão PromoBot",
+            width=180,
+            command=lambda: self.select_manual_destination("review"),
+        )
+        self.review_destination_button.pack(side="left", padx=(0, 8))
+        self.house_destination_button = ctk.CTkButton(
+            destination_row,
+            text="Casa & Ofertas",
+            width=180,
+            command=lambda: self.select_manual_destination("house"),
+        )
+        self.house_destination_button.pack(side="left")
+        self.update_destination_buttons()
+
         buttons = ctk.CTkFrame(form, fg_color="transparent")
-        buttons.grid(row=9, column=0, sticky="ew", padx=18, pady=(0, 12))
+        buttons.grid(row=10, column=0, sticky="ew", padx=18, pady=(0, 12))
 
         self.save_button = ctk.CTkButton(
             buttons,
-            text="Salvar e validar",
+            text="Salvar vínculo manual",
             width=160,
             command=self.save_link,
         )
@@ -354,12 +383,51 @@ class AffiliateLinksPage(ctk.CTkFrame):
             self.ignore_button.pack_forget()
 
         ctk.CTkLabel(form, text="Ultimos envios", anchor="w").grid(
-            row=10, column=0, sticky="ew", padx=18, pady=(0, 5)
+            row=11, column=0, sticky="ew", padx=18, pady=(0, 5)
         )
 
         self.history = ctk.CTkTextbox(form, height=150)
-        self.history.grid(row=11, column=0, sticky="nsew", padx=18, pady=(0, 18))
-        form.grid_rowconfigure(11, weight=1)
+        self.history.grid(row=12, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        form.grid_rowconfigure(12, weight=1)
+
+    def select_manual_destination(self, destination):
+
+        if destination not in self.MANUAL_DESTINATIONS:
+            raise ValueError("Destino manual inválido.")
+        self.selected_destination.set(destination)
+        self.update_destination_buttons()
+
+    def clear_manual_destination(self):
+
+        self.selected_destination.set("")
+        self.update_destination_buttons()
+
+    def update_destination_buttons(self):
+
+        selected = self.selected_destination.get()
+        for key, button in (
+            ("review", self.review_destination_button),
+            ("house", self.house_destination_button),
+        ):
+            active = key == selected
+            button.configure(
+                fg_color=(
+                    self.DESTINATION_SELECTED_COLOR
+                    if active else self.DESTINATION_DEFAULT_COLOR
+                ),
+                border_width=2 if active else 0,
+                border_color=(
+                    "#ffffff" if active else self.DESTINATION_DEFAULT_COLOR
+                ),
+            )
+
+    def selected_destination_config(self):
+
+        selected = self.selected_destination.get()
+        if selected not in self.MANUAL_DESTINATIONS:
+            return "", "", ""
+        label, env_name = self.MANUAL_DESTINATIONS[selected]
+        return selected, label, os.getenv(env_name, "").strip()
 
     def manual_product_data(self, link):
 
@@ -737,6 +805,22 @@ class AffiliateLinksPage(ctk.CTkFrame):
         return product
 
     def save_and_notify(self):
+
+        destination_key, destination_label, destination = (
+            self.selected_destination_config()
+        )
+        if not destination_key:
+            messagebox.showwarning(
+                "Selecione o destino",
+                "Selecione Revisão PromoBot ou Casa & Ofertas antes de enviar.",
+            )
+            return
+        if not destination:
+            messagebox.showerror(
+                "Destino não configurado",
+                f"O destino {destination_label} não está configurado no sistema.",
+            )
+            return
 
         shopee_manual_active = False
         manual_product = None
@@ -1117,16 +1201,10 @@ class AffiliateLinksPage(ctk.CTkFrame):
                 "imediatamente_antes_do_notifier",
                 product,
             )
-        result = (
-            self.notifier.send_manual_alerts(
-                [product],
-                ignore_notification_hours=ignore_notification_hours,
-            )
-            if manual_override
-            else self.notifier.send_alerts(
-                [product],
-                ignore_notification_hours=ignore_notification_hours,
-            )
+        result = self.send_to_selected_destination(
+            product,
+            destination_label,
+            destination,
         )
 
         if result.startswith("Enviado por:"):
@@ -1135,15 +1213,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
                 product["loja"],
                 product["titulo"],
             )
-            messagebox.showinfo("Notificacao", result)
-        else:
-            route = self.notifier.category_routing_diagnostic(product)
-            detail = (
-                "\n\n" + self.notifier.category_block_message(product)
-                if route["reason"].startswith("CATEGORY_")
-                else ""
-            )
-            messagebox.showerror("Falha na notificacao", result + detail)
+        self.show_manual_destination_result(result)
 
         self.load_pending()
 
@@ -1209,10 +1279,80 @@ class AffiliateLinksPage(ctk.CTkFrame):
                 f"{delivery['data']} | {delivery['status'].upper()} | "
                 f"{delivery['canal']} | {delivery['loja']}\n"
                 f"Produto: {delivery['titulo']}\n"
+                f"Destino: {delivery['destino'] or 'nao informado'}\n"
                 f"Etiqueta: {delivery['etiqueta'] or 'nao informada'}\n"
                 f"Link: {delivery['link_afiliado']}\n"
                 "------------------------------------------------------------\n",
             )
+
+    def send_to_selected_destination(
+        self,
+        product,
+        destination_label,
+        destination,
+    ):
+
+        product = dict(product)
+        send_logger = logging.getLogger("promobot.manual_destination")
+        title = str(product.get("titulo", "") or "")
+        store = str(product.get("loja", "") or "")
+        result_status = "FAILED"
+        try:
+            if not destination:
+                return f"Falha: destino {destination_label} não configurado."
+            if not self.notifier.whatsapp_configured():
+                return "Falha: WhatsApp não configurado."
+            if not self.notifier.has_affiliate_link(product):
+                return "Falha: link afiliado oficial não validado."
+
+            prepared_image = product.get("imagem_whatsapp")
+            image = (
+                prepared_image
+                if isinstance(prepared_image, (bytes, bytearray))
+                else self.notifier.verified_whatsapp_image(product)
+            )
+            if not (
+                isinstance(image, (bytes, bytearray))
+                or str(image or "").startswith("http")
+            ):
+                return "Falha: imagem do produto não confirmada."
+
+            self.notifier.send_whatsapp_message(
+                self.notifier.format_alert(product),
+                image,
+                destination,
+            )
+            original_link = str(product.get("link", "") or "")
+            self.database.registrar_envio(
+                store,
+                title,
+                original_link,
+                self.notifier.affiliate_link(product),
+                self.database.etiqueta_link_afiliado(original_link),
+                "WhatsApp Manual",
+                destination,
+            )
+            result_status = "SENT"
+            return f"Enviado por: WhatsApp — {destination_label}."
+        except Exception as error:
+            return f"Falha no envio para {destination_label}: {error}"
+        finally:
+            send_logger.info(
+                "product=%s store=%s destination=%s result=%s",
+                title,
+                store,
+                destination_label,
+                result_status,
+            )
+
+    def show_manual_destination_result(self, result):
+
+        if str(result or "").startswith("Enviado por:"):
+            messagebox.showinfo("Notificação", result)
+            self.clear_manual_destination()
+            return True
+        messagebox.showerror("Falha na notificação", result)
+        return False
 
     def validate_link(self, product, affiliate_link):
 

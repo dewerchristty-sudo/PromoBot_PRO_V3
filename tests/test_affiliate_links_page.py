@@ -261,6 +261,10 @@ class AffiliateLinksPageTest(unittest.TestCase):
         page.update_idletasks = Mock()
         page.load_pending = Mock()
         page.trace_manual_product = Mock()
+        page.selected_destination_config = Mock(
+            return_value=("review", "Revisão PromoBot", "review@g.us")
+        )
+        page.show_manual_destination_result = Mock()
         page.affiliate_link = type(
             "Field",
             (),
@@ -276,11 +280,14 @@ class AffiliateLinksPageTest(unittest.TestCase):
         notifier.partition_offer_quality.return_value = ([{}], [], [])
         captured = {}
 
-        def send_alerts(products, **_kwargs):
-            captured.update(products[0])
-            return "Enviado por: WhatsApp"
-
-        notifier.send_alerts.side_effect = send_alerts
+        notifier.whatsapp_configured.return_value = True
+        notifier.has_affiliate_link.return_value = True
+        notifier.affiliate_link.return_value = (
+            "https://s.shopee.com.br/teste"
+        )
+        notifier.format_alert.side_effect = lambda product: (
+            captured.update(product) or "mensagem"
+        )
         page.notifier = notifier
 
         page.save_and_notify()
