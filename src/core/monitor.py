@@ -411,12 +411,13 @@ class MonitorRunner:
             termo,
             lojas_configuradas,
         )
-        manager = StoreManager(
-            progress_callback=self.progress_callback,
-            enabled_stores=lojas,
-            telemetry_observer=self.telemetry_observer(execution_id),
-        )
+        manager = None
         try:
+            manager = StoreManager(
+                progress_callback=self.progress_callback,
+                enabled_stores=lojas,
+                telemetry_observer=self.telemetry_observer(execution_id),
+            )
             resultados = manager.search_all(termo)
             self.database.salvar_lista(resultados)
             self.database.registrar_execucao_monitoramento(
@@ -441,6 +442,18 @@ class MonitorRunner:
                 "failed",
             )
             raise
+        finally:
+            self.close_store_resources(manager)
+
+    @staticmethod
+    def close_store_resources(manager):
+        for store in getattr(manager, "stores", ()) if manager else ():
+            closer = getattr(store, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
 
     def start_telemetry_execution(
         self,

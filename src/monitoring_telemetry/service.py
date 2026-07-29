@@ -62,6 +62,7 @@ class MonitorTelemetryService:
     def __init__(self, repository):
         self.repository = repository
         self.execution_started = {}
+        self.execution_store_statuses = {}
         self.closed = False
 
     @classmethod
@@ -89,6 +90,7 @@ class MonitorTelemetryService:
         execution_id = uuid4().hex
         started_at = utc_now()
         self.execution_started[execution_id] = time.perf_counter()
+        self.execution_store_statuses[execution_id] = []
         execution = MonitorExecution(
             execution_id=execution_id,
             monitor_id=int(monitor_id),
@@ -107,6 +109,7 @@ class MonitorTelemetryService:
             return execution_id
         except Exception:
             self.execution_started.pop(execution_id, None)
+            self.execution_store_statuses.pop(execution_id, None)
             return None
 
     def store_observer(self, execution_id):
@@ -115,6 +118,10 @@ class MonitorTelemetryService:
         return MonitorStoreTelemetryObserver(self, execution_id)
 
     def record_store(self, store_run):
+        self.execution_store_statuses.setdefault(
+            store_run.execution_id,
+            [],
+        ).append(store_run.status)
         try:
             self.repository.add_store_run(store_run)
             return True
@@ -125,9 +132,15 @@ class MonitorTelemetryService:
         if not execution_id:
             return False
         started = self.execution_started.pop(execution_id, None)
+        store_statuses = self.execution_store_statuses.pop(execution_id, [])
         duration_ms = (
             (time.perf_counter() - started) * 1000
             if started is not None else None
+        )
+        final_status = self.final_execution_status(
+            store_statuses,
+            aggregate_total,
+            status,
         )
         try:
             self.repository.finish_execution(
@@ -135,11 +148,27 @@ class MonitorTelemetryService:
                 utc_now(),
                 duration_ms,
                 aggregate_total,
-                status,
+                final_status,
             )
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def final_execution_status(store_statuses, aggregate_total, fallback):
+        if fallback == "failed":
+            return "failed"
+        if not store_statuses:
+            return fallback
+
+        failures = sum(status == "error" for status in store_statuses)
+        if failures == len(store_statuses):
+            return "failed"
+        if failures:
+            return "partial_success"
+        if (aggregate_total or 0) == 0:
+            return "zero_results"
+        return "success"
 
     def close(self):
         if not self.closed:

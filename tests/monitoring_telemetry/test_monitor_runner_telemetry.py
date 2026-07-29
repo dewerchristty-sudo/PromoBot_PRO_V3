@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src.core.monitor import MonitorRunner
+from src.monitoring_telemetry.service import MonitorTelemetryService
 
 
 class MonitorRunnerTelemetryTest(unittest.TestCase):
@@ -92,6 +93,46 @@ class MonitorRunnerTelemetryTest(unittest.TestCase):
         }, clear=False):
             runner = MonitorRunner(self.database())
         self.assertIsNone(runner.telemetry_service)
+
+    def test_final_execution_statuses(self):
+        cases = (
+            (["success"], 3, "success"),
+            (["success", "error"], 3, "partial_success"),
+            (["zero_results", "filtered_out"], 0, "zero_results"),
+            (["error", "error"], 0, "failed"),
+        )
+        for store_statuses, total, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    MonitorTelemetryService.final_execution_status(
+                        store_statuses,
+                        total,
+                        "success",
+                    ),
+                    expected,
+                )
+
+    def test_telemetry_enabled_and_disabled_keep_same_functional_result(self):
+        products = [{"loja": "Mercado Livre"}] * 2
+        totals = []
+
+        for telemetry in (None, Mock()):
+            database = self.database()
+            runner = MonitorRunner(database, telemetry_service=telemetry)
+            runner.telemetry_service = telemetry
+            if telemetry is not None:
+                telemetry.start_execution.return_value = "execution-1"
+                telemetry.store_observer.return_value = Mock()
+            with patch("src.core.monitor.StoreManager") as manager_class:
+                manager_class.return_value.search_all.return_value = products
+                manager_class.return_value.stores = []
+                totals.append(runner.execute_monitoring(self.monitoring()))
+            database.registrar_execucao_monitoramento.assert_called_once_with(
+                7,
+                2,
+            )
+
+        self.assertEqual(totals, [2, 2])
 
 
 if __name__ == "__main__":

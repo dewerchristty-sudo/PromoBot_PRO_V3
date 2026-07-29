@@ -2,7 +2,7 @@ import unittest
 import threading
 import time
 from datetime import datetime, timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from src.core.monitor import MonitorRunner
 
@@ -180,6 +180,113 @@ class MonitorRunnerTest(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
         liberar.set()
         worker.join(1)
+
+    @staticmethod
+    def monitoring():
+        return {
+            "id": 7,
+            "termo": "air fryer",
+            "lojas": "Mercado Livre,Amazon,Shopee",
+        }
+
+    def test_execute_monitoring_closes_all_stores_after_success(self):
+        database = self.make_idle_database()
+        runner = MonitorRunner(database)
+        stores = [Mock(), Mock(), Mock()]
+
+        with patch("src.core.monitor.StoreManager") as manager_class:
+            manager_class.return_value.stores = stores
+            manager_class.return_value.search_all.return_value = [{"id": 1}]
+            self.assertEqual(runner.execute_monitoring(self.monitoring()), 1)
+
+        for store in stores:
+            store.close.assert_called_once_with()
+
+    def test_execute_monitoring_closes_all_stores_after_error(self):
+        database = self.make_idle_database()
+        database.salvar_lista.side_effect = RuntimeError("database unavailable")
+        runner = MonitorRunner(database)
+        stores = [Mock(), Mock(), Mock()]
+
+        with patch("src.core.monitor.StoreManager") as manager_class:
+            manager_class.return_value.stores = stores
+            manager_class.return_value.search_all.return_value = [{"id": 1}]
+            with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+                runner.execute_monitoring(self.monitoring())
+
+        for store in stores:
+            store.close.assert_called_once_with()
+
+    def test_close_error_is_non_blocking_and_repeated_close_is_tolerated(self):
+        first = Mock()
+        first.close.side_effect = RuntimeError("close failed")
+        second = Mock()
+        manager = Mock(stores=[first, second])
+
+        MonitorRunner.close_store_resources(manager)
+        MonitorRunner.close_store_resources(manager)
+
+        self.assertEqual(first.close.call_count, 2)
+        self.assertEqual(second.close.call_count, 2)
+
+    def test_five_consecutive_executions_close_playwright_resources(self):
+        database = self.make_idle_database()
+        runner = MonitorRunner(database)
+        active_resource = {"open": False}
+        managers = []
+
+        def build_manager(**_kwargs):
+            if active_resource["open"]:
+                raise RuntimeError(
+                    "Playwright Sync API inside the asyncio loop"
+                )
+            store = Mock()
+            store.close.side_effect = lambda: active_resource.update(open=False)
+            manager = Mock(stores=[store])
+            manager.search_all.side_effect = lambda _term: (
+                active_resource.update(open=True) or [{"id": 1}]
+            )
+            managers.append(manager)
+            return manager
+
+        with patch("src.core.monitor.StoreManager", side_effect=build_manager):
+            totals = [
+                runner.execute_monitoring(self.monitoring())
+                for _ in range(5)
+            ]
+
+        self.assertEqual(totals, [1, 1, 1, 1, 1])
+        self.assertFalse(active_resource["open"])
+        self.assertEqual(
+            [manager.stores[0].close.call_count for manager in managers],
+            [1, 1, 1, 1, 1],
+        )
+
+    def test_manual_and_automatic_runs_do_not_execute_simultaneously(self):
+        runner = MonitorRunner(self.make_idle_database())
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+
+        def run_cycle():
+            if not first_started.is_set():
+                first_started.set()
+                release_first.wait(1)
+            else:
+                second_started.set()
+            return 0
+
+        runner._run_once_unlocked = run_cycle
+        automatic = threading.Thread(target=runner.run_once)
+        manual = threading.Thread(target=runner.run_once)
+        automatic.start()
+        self.assertTrue(first_started.wait(1))
+        manual.start()
+        self.assertFalse(second_started.wait(0.05))
+        release_first.set()
+        automatic.join(1)
+        manual.join(1)
+        self.assertTrue(second_started.is_set())
 
 
 if __name__ == "__main__":
