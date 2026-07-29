@@ -20,6 +20,7 @@ from src.ui.category_hub_page import CategoryHubPage
 from src.ui.daily_deals_page import DailyDealsPage
 from src.ui.offer_dashboard import OfferDashboard
 from src.ui.delivery_dashboard import DeliveryDashboard
+from src.ui.statistics_dashboard import StatisticsDashboard
 
 
 class MainWindow(ctk.CTk):
@@ -105,6 +106,8 @@ class MainWindow(ctk.CTk):
             ("Historico", self.mostrar_historico),
 
             ("Entregas", self.mostrar_entregas),
+
+            ("Estatísticas", self.mostrar_estatisticas),
 
             ("Configuracoes", self.mostrar_configuracoes)
 
@@ -243,6 +246,14 @@ class MainWindow(ctk.CTk):
             "entregas",
             lambda: DeliveryDashboard(self.area, self.database),
             "Entregas por destino",
+        )
+
+    def mostrar_estatisticas(self):
+
+        self.mostrar_pagina(
+            "estatisticas",
+            lambda: StatisticsDashboard(self.area, self.database),
+            "Central de Estatísticas",
         )
 
     # ===============================================
