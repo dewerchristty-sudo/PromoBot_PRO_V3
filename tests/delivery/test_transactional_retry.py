@@ -169,17 +169,22 @@ class TransactionalRetryTest(unittest.TestCase):
         )
 
     def test_resultado_incerto_vai_para_revisao(self):
-        delivery = self.delivery()
-        self.service.process_due(
-            lambda _delivery: self.execution(
-                send=Mock(side_effect=RuntimeError("resultado indeterminado"))
-            ),
-            self.now,
-        )
-        self.assertEqual(
-            self.repository.get(delivery.id).status,
-            DeliveryStatus.REVIEW_REQUIRED,
-        )
+        for index, message in enumerate((
+            "resultado indeterminado",
+            "resultado externo indeterminado",
+        ), 1):
+            with self.subTest(message=message):
+                delivery = self.delivery(str(index))
+                self.service.process_due(
+                    lambda _delivery, message=message: self.execution(
+                        send=Mock(side_effect=RuntimeError(message))
+                    ),
+                    self.now,
+                )
+                self.assertEqual(
+                    self.repository.get(delivery.id).status,
+                    DeliveryStatus.REVIEW_REQUIRED,
+                )
 
     def test_status_http_temporarios(self):
         for status in (408, 429, 500, 502, 503, 504):
@@ -319,6 +324,45 @@ class TransactionalRetryTest(unittest.TestCase):
             self.repository.get(second.id).status,
             DeliveryStatus.SENT,
         )
+
+    def test_tres_destinos_ficam_isolados(self):
+        service = DeliveryService(self.repository, self.policy)
+        calls = {"A": 0, "B": 0, "C": 0}
+
+        def send(name):
+            calls[name] += 1
+            if name == "B":
+                raise requests.Timeout("timeout")
+            if name == "C":
+                raise ValueError("destino invalido")
+            return True
+
+        stored = {}
+        for name, destination in (
+            ("A", "5511999999901"),
+            ("B", "5511999999902"),
+            ("C", "5511999999903"),
+        ):
+            result = service.deliver(
+                DestinationDelivery.create(
+                    f"isolation-{name}",
+                    "WhatsApp",
+                    destination,
+                ),
+                lambda name=name: send(name),
+            )
+            stored[name] = self.repository.get(result.delivery_id)
+
+        self.assertEqual(stored["A"].status, DeliveryStatus.SENT)
+        self.assertEqual(
+            stored["B"].status,
+            DeliveryStatus.WAITING_RETRY,
+        )
+        self.assertEqual(
+            stored["C"].status,
+            DeliveryStatus.DEFINITIVE_FAILURE,
+        )
+        self.assertEqual(calls, {"A": 1, "B": 1, "C": 1})
 
     def test_estados_nao_elegiveis_nao_sao_processados(self):
         for index, status in enumerate((

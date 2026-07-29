@@ -103,6 +103,7 @@ class TransactionalRetryPolicy:
         if any(marker in text for marker in (
             "resposta perdida",
             "resultado indeterminado",
+            "resultado externo indeterminado",
             "estado incerto",
             "aceito externamente",
             "accepted externally",
