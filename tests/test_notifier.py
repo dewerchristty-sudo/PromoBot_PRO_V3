@@ -437,7 +437,7 @@ class NotifierTest(unittest.TestCase):
         self.connection_patch.stop()
 
     @patch.dict("os.environ", {
-        "WHATSAPP_PERSONAL_ALERT_PHONES": "5527996703669",
+        "WHATSAPP_PERSONAL_ALERT_PHONES": "5511999999999",
         "PERSONAL_ALERT_MIN_DISCOUNT_PERCENT": "60",
         "PERSONAL_ALERT_MAX_DISCOUNT_PERCENT": "90",
         "PERSONAL_ALERT_MIN_SAVINGS": "50",
@@ -459,7 +459,7 @@ class NotifierTest(unittest.TestCase):
 
     @patch.dict("os.environ", {
         "WHATSAPP_GROUPS": "grupo@g.us",
-        "WHATSAPP_PERSONAL_ALERT_PHONES": "5527996703669",
+        "WHATSAPP_PERSONAL_ALERT_PHONES": "5511999999999",
         "PERSONAL_ALERT_MIN_DISCOUNT_PERCENT": "60",
         "PERSONAL_ALERT_MAX_DISCOUNT_PERCENT": "90",
         "PERSONAL_ALERT_MIN_SAVINGS": "50",

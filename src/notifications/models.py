@@ -69,4 +69,3 @@ class PreparedNotification:
     style: MessageStyle
     product_link: str = ""
     image_link: str = ""
-
