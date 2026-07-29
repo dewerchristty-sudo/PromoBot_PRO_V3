@@ -93,11 +93,6 @@ class SearchPage(ctk.CTkFrame):
                 lojas_frame,
                 text=nome,
                 variable=variavel,
-                state=(
-                    "disabled"
-                    if nome in StoreManager.default_store_names()
-                    else "normal"
-                )
             ).pack(side="left", padx=(0, 12), pady=10)
 
         self.status = ctk.CTkLabel(
