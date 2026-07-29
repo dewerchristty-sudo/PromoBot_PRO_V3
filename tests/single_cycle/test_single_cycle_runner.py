@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import ANY, Mock, patch
 
-from scripts.run_single_offer_cycle import parser
+from scripts.run_single_offer_cycle import main, parser
 from src.core.single_cycle_runner import (
     SingleCycleConfig,
     SingleCycleMode,
@@ -85,6 +85,116 @@ class SingleCycleRunnerTest(unittest.TestCase):
             "--destination", self.destination,
         ])
         self.assertFalse(args.real_send)
+        self.assertFalse(args.visible_browser)
+        self.assertFalse(args.shopee_persistent_profile)
+
+    @patch("scripts.run_single_offer_cycle.SingleCycleRunner")
+    @patch("scripts.run_single_offer_cycle.BrowserManager")
+    def test_cli_uses_headless_browser_by_default(
+        self,
+        browser_manager_class,
+        runner_class,
+    ):
+        runner_class.return_value.run.return_value.as_dict.return_value = {}
+        main([
+            "--term", "produto", "--stores", "amazon",
+            "--destination", self.destination,
+        ])
+        browser_manager_class.assert_called_once_with(headless=True)
+        self.assertIs(
+            runner_class.call_args.kwargs["browser_manager"],
+            browser_manager_class.return_value,
+        )
+
+    @patch("scripts.run_single_offer_cycle.SingleCycleRunner")
+    @patch("scripts.run_single_offer_cycle.BrowserManager")
+    def test_cli_visible_browser_disables_headless(
+        self,
+        browser_manager_class,
+        runner_class,
+    ):
+        runner_class.return_value.run.return_value.as_dict.return_value = {}
+        main([
+            "--term", "produto", "--stores", "amazon",
+            "--destination", self.destination, "--visible-browser",
+        ])
+        browser_manager_class.assert_called_once_with(headless=False)
+        self.assertIs(
+            runner_class.call_args.kwargs["browser_manager"],
+            browser_manager_class.return_value,
+        )
+
+    @patch(
+        "scripts.run_single_offer_cycle.prompt_amazon_tag",
+        return_value="fixture-unit-20",
+    )
+    @patch(
+        "scripts.run_single_offer_cycle.SingleCycleRunner",
+        wraps=SingleCycleRunner,
+    )
+    @patch("scripts.run_single_offer_cycle.BrowserManager")
+    @patch("src.core.single_cycle_runner.StoreManager")
+    def test_cli_visible_browser_with_amazon_tag_keeps_visible_and_closes(
+        self,
+        manager_class,
+        browser_manager_class,
+        runner_class,
+        prompt,
+    ):
+        manager_class.return_value.stores = [Mock()]
+        manager_class.return_value.search_all.return_value = []
+        main([
+            "--term", "produto", "--stores", "amazon",
+            "--destination", self.destination,
+            "--visible-browser", "--prompt-amazon-tag",
+        ])
+        prompt.assert_called_once_with()
+        browser_manager_class.assert_called_once_with(headless=False)
+        self.assertEqual(
+            runner_class.call_args.kwargs["amazon_associate_tag"],
+            "fixture-unit-20",
+        )
+        self.assertIs(
+            runner_class.call_args.kwargs["browser_manager"],
+            browser_manager_class.return_value,
+        )
+        browser_manager_class.return_value.close.assert_called_once_with()
+
+    @patch("scripts.run_single_offer_cycle.SingleCycleRunner")
+    @patch("scripts.run_single_offer_cycle.BrowserManager")
+    def test_cli_shopee_persistent_profile_is_explicit_and_exclusive(
+        self,
+        browser_manager_class,
+        runner_class,
+    ):
+        runner_class.return_value.run.return_value.as_dict.return_value = {}
+        main([
+            "--term", "produto", "--stores", "shopee",
+            "--destination", self.destination,
+            "--visible-browser", "--shopee-persistent-profile",
+        ])
+        call = browser_manager_class.call_args
+        self.assertFalse(call.kwargs["headless"])
+        self.assertEqual(
+            call.kwargs["user_data_dir"].as_posix().rsplit("/", 3)[-3:],
+            ["data", "browser_profiles", "shopee_playwright"],
+        )
+
+    def test_cli_shopee_persistent_profile_requires_visible_browser(self):
+        with self.assertRaises(SystemExit):
+            main([
+                "--term", "produto", "--stores", "shopee",
+                "--destination", self.destination,
+                "--shopee-persistent-profile",
+            ])
+
+    def test_cli_shopee_persistent_profile_rejects_other_stores(self):
+        with self.assertRaises(SystemExit):
+            main([
+                "--term", "produto", "--stores", "shopee", "amazon",
+                "--destination", self.destination,
+                "--visible-browser", "--shopee-persistent-profile",
+            ])
 
     def test_02_destination_is_required(self):
         with self.assertRaisesRegex(ValueError, "obrigatorio"):
@@ -399,6 +509,47 @@ class SingleCycleRunnerTest(unittest.TestCase):
             enabled_stores=["Amazon"],
             offer_shadow_enabled=None,
         )
+
+    @patch("src.core.single_cycle_runner.StoreManager")
+    def test_shared_browser_is_provided_and_closed(self, manager_class):
+        browser_manager = Mock()
+        store = Mock()
+        manager_class.return_value.stores = [store]
+        manager_class.return_value.search_all.return_value = []
+        runner = SingleCycleRunner(
+            self.config(),
+            browser_manager=browser_manager,
+        )
+        runner.run()
+        self.assertIs(store.browser_manager, browser_manager)
+        browser_manager.close.assert_called_once_with()
+
+    def test_shared_browser_is_closed_when_cycle_raises(self):
+        browser_manager = Mock()
+        notifier = Mock()
+        notifier.float_env.side_effect = RuntimeError("falha simulada")
+        with self.assertRaisesRegex(RuntimeError, "falha simulada"):
+            SingleCycleRunner(
+                self.config(),
+                collector=self.collector,
+                database=self.database,
+                notifier=notifier,
+                browser_manager=browser_manager,
+            ).run()
+        browser_manager.close.assert_called_once_with()
+
+    def test_shared_browser_is_closed_when_database_open_raises(self):
+        browser_manager = Mock()
+        runner = SingleCycleRunner(
+            self.config(),
+            browser_manager=browser_manager,
+        )
+        runner.open_database = Mock(
+            side_effect=RuntimeError("falha ao abrir banco")
+        )
+        with self.assertRaisesRegex(RuntimeError, "falha ao abrir banco"):
+            runner.run()
+        browser_manager.close.assert_called_once_with()
 
     def test_store_manager_none_preserves_environment_shadow_flag(self):
         pipeline = Mock()

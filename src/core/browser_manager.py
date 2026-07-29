@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Optional
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
@@ -12,9 +13,17 @@ from src.constants import (
 
 class BrowserManager:
 
-    def __init__(self, headless: bool = True) -> None:
+    def __init__(
+        self,
+        headless: bool = True,
+        user_data_dir=None,
+    ) -> None:
 
         self.headless = headless
+        self.user_data_dir = (
+            Path(user_data_dir)
+            if user_data_dir is not None else None
+        )
 
         self.playwright: Optional[Any] = None
         self.browser: Optional[Browser] = None
@@ -39,6 +48,33 @@ class BrowserManager:
                 args.append("--headless=new")
             else:
                 args.append("--start-maximized")
+
+            if self.user_data_dir is not None:
+                if (
+                    self.user_data_dir.exists()
+                    and not self.user_data_dir.is_dir()
+                ):
+                    raise ValueError(
+                        "O perfil persistente deve apontar para uma pasta."
+                    )
+                self.user_data_dir.mkdir(parents=True, exist_ok=True)
+                self.context = (
+                    self.playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(self.user_data_dir.resolve()),
+                        headless=self.headless,
+                        args=args,
+                        viewport={
+                            "width": BROWSER_VIEWPORT_WIDTH,
+                            "height": BROWSER_VIEWPORT_HEIGHT
+                        },
+                        locale=BROWSER_LOCALE,
+                        timezone_id=BROWSER_TIMEZONE,
+                        user_agent=BROWSER_USER_AGENT,
+                        java_script_enabled=True,
+                        ignore_https_errors=True,
+                    )
+                )
+                return self.context
 
             self.browser = self.playwright.chromium.launch(
 

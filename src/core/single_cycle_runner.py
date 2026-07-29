@@ -171,6 +171,7 @@ class SingleCycleRunner:
         notifier=None,
         clock=None,
         amazon_associate_tag=None,
+        browser_manager=None,
     ):
         if not isinstance(config, SingleCycleConfig):
             raise TypeError("config deve ser SingleCycleConfig.")
@@ -179,6 +180,7 @@ class SingleCycleRunner:
         self.transport = transport
         self.database = database
         self.notifier = notifier
+        self.browser_manager = browser_manager
         self.clock = clock or time.monotonic
         self._amazon_associate_tag = (
             validate_associate_tag(amazon_associate_tag)
@@ -196,6 +198,9 @@ class SingleCycleRunner:
                 else None
             ),
         )
+        if self.browser_manager is not None:
+            for store in manager.stores:
+                store.browser_manager = self.browser_manager
         products = manager.search_all(term)
         errors = [
             message for message in messages
@@ -208,9 +213,12 @@ class SingleCycleRunner:
     def run(self):
         started = self.clock()
         execution_id = uuid4().hex
-        database, owned_database, temporary = self.open_database()
-        notifier = self.notifier or Notifier(database)
+        database = None
+        owned_database = False
+        temporary = None
         try:
+            database, owned_database, temporary = self.open_database()
+            notifier = self.notifier or Notifier(database)
             products, stores_with_error = self.collect(execution_id)
             eligible = self.eligible_products(
                 products,
@@ -271,6 +279,8 @@ class SingleCycleRunner:
             )
         finally:
             self._amazon_associate_tag = ""
+            if self.browser_manager is not None:
+                self.browser_manager.close()
             if owned_database:
                 database.fechar()
             if temporary is not None:
