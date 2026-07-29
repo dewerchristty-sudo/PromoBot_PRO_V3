@@ -1,5 +1,7 @@
 import re
+import time
 import unicodedata
+from datetime import datetime, timezone
 from typing import Callable, Optional, Any
 
 from src.stores import Amazon
@@ -21,12 +23,14 @@ class StoreManager:
         enabled_stores: Optional[list[str]] = None,
         offer_pipeline=None,
         offer_shadow_enabled: Optional[bool] = None,
+        telemetry_observer=None,
     ) -> None:
 
         self.progress_callback = progress_callback
         self.enabled_stores = enabled_stores
         self.offer_pipeline = offer_pipeline
         self.offer_shadow_enabled = offer_shadow_enabled
+        self.telemetry_observer = telemetry_observer
 
         self.stores = [
 
@@ -67,11 +71,17 @@ class StoreManager:
         for store in self.stores:
 
             self.log(f"\n>>> {store.name}")
+            started_at = datetime.now(timezone.utc).isoformat()
+            started = time.perf_counter()
+            returned_count = None
+            sanitized_count = None
 
             try:
 
                 encontrados = store.search(product)
+                returned_count = len(encontrados or [])
                 encontrados = self.sanitize_results(encontrados)
+                sanitized_count = len(encontrados)
                 encontrados = self.filter_by_requested_capacity(
                     product,
                     encontrados
@@ -96,10 +106,42 @@ class StoreManager:
                 resultados.extend(
                     encontrados
                 )
+                if returned_count == 0:
+                    status = "zero_results"
+                    error_type = "zero_results"
+                elif sanitized_count == 0:
+                    status = "sanitization_total"
+                    error_type = "sanitization_total"
+                elif not encontrados:
+                    status = "filtered_out"
+                    error_type = None
+                else:
+                    status = "success"
+                    error_type = None
+                self.record_store_telemetry(
+                    store_name=store.name,
+                    started_at=started_at,
+                    started=started,
+                    returned_count=returned_count,
+                    sanitized_count=sanitized_count,
+                    aggregate_added_count=len(encontrados),
+                    status=status,
+                    error_type=error_type,
+                )
 
             except Exception as e:
 
                 self.log(f"[ERRO] {store.name}: {str(e)}")
+                self.record_store_telemetry(
+                    store_name=store.name,
+                    started_at=started_at,
+                    started=started,
+                    returned_count=returned_count,
+                    sanitized_count=sanitized_count,
+                    aggregate_added_count=0,
+                    status="error",
+                    error=e,
+                )
 
         self.log("\n" + "=" * 60)
         self.log(
@@ -110,6 +152,40 @@ class StoreManager:
         self.observe_offer_shadow(resultados)
 
         return resultados
+
+    # ==========================================
+
+    def record_store_telemetry(
+        self,
+        *,
+        store_name,
+        started_at,
+        started,
+        returned_count,
+        sanitized_count,
+        aggregate_added_count,
+        status,
+        error=None,
+        error_type=None,
+    ):
+        observer = self.telemetry_observer
+        if observer is None:
+            return
+        try:
+            observer.record_store(
+                store_name=store_name,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=(time.perf_counter() - started) * 1000,
+                returned_count=returned_count,
+                sanitized_count=sanitized_count,
+                aggregate_added_count=aggregate_added_count,
+                status=status,
+                error=error,
+                error_type=error_type,
+            )
+        except Exception:
+            pass
 
     # ==========================================
 

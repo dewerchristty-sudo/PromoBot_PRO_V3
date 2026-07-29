@@ -16,6 +16,7 @@ from src.core.retry_policy import TransactionalRetryPolicy
 from src.core.store_manager import StoreManager
 from src.database.delivery_repository import DeliveryRepository
 from src.database.offer_pipeline_repository import OfferPipelineRepository
+from src.monitoring_telemetry.service import MonitorTelemetryService
 from src.offers.activation import OfferActivationFlags
 from src.offers.activation_control import OfferActivationManager
 from src.offers.auto_stop import OfferCanaryAutoStop
@@ -28,7 +29,12 @@ class MonitorRunner:
     MAX_MONITORS_PER_BATCH = 2
     SCHEDULER_POLL_SECONDS = 60
 
-    def __init__(self, database, progress_callback=None):
+    def __init__(
+        self,
+        database,
+        progress_callback=None,
+        telemetry_service=None,
+    ):
 
         self.database = database
         self.progress_callback = progress_callback
@@ -48,6 +54,12 @@ class MonitorRunner:
         }
         self._last_shopee_detect = None
         self.SHOPEE_DETECT_INTERVAL_MINUTES = 10
+        self.owns_telemetry_service = telemetry_service is None
+        self.telemetry_service = (
+            telemetry_service
+            if telemetry_service is not None
+            else MonitorTelemetryService.from_environment()
+        )
 
     def start(self):
 
@@ -106,7 +118,11 @@ class MonitorRunner:
             not worker or worker is current or not worker.is_alive()
             for worker in (self.thread, self.supervisor_thread)
         )
-        return acquired and workers_stopped
+        clean = acquired and workers_stopped
+        if clean and self.owns_telemetry_service and self.telemetry_service:
+            self.telemetry_service.close()
+            self.telemetry_service = None
+        return clean
 
     def set_progress_callback(self, progress_callback):
 
@@ -381,7 +397,8 @@ class MonitorRunner:
     def execute_monitoring(self, monitoramento):
 
         termo = monitoramento["termo"]
-        lojas = self.parse_stores(monitoramento["lojas"])
+        lojas_configuradas = self.parse_stores(monitoramento["lojas"])
+        lojas = list(lojas_configuradas)
         lojas = [loja for loja in lojas if is_active_store(loja)]
 
         if not lojas:
@@ -389,22 +406,83 @@ class MonitorRunner:
 
         self.log(f"Monitorando '{termo}' em {', '.join(lojas)}")
 
+        execution_id = self.start_telemetry_execution(
+            monitoramento,
+            termo,
+            lojas_configuradas,
+        )
         manager = StoreManager(
             progress_callback=self.progress_callback,
-            enabled_stores=lojas
+            enabled_stores=lojas,
+            telemetry_observer=self.telemetry_observer(execution_id),
         )
-        resultados = manager.search_all(termo)
-        self.database.salvar_lista(resultados)
-        self.database.registrar_execucao_monitoramento(
-            monitoramento["id"],
-            len(resultados)
-        )
+        try:
+            resultados = manager.search_all(termo)
+            self.database.salvar_lista(resultados)
+            self.database.registrar_execucao_monitoramento(
+                monitoramento["id"],
+                len(resultados)
+            )
 
-        self.log(
-            f"Monitoramento '{termo}' concluiu com {len(resultados)} produto(s)."
-        )
+            self.log(
+                f"Monitoramento '{termo}' concluiu com "
+                f"{len(resultados)} produto(s)."
+            )
+            self.finish_telemetry_execution(
+                execution_id,
+                len(resultados),
+                "success",
+            )
+            return len(resultados)
+        except Exception:
+            self.finish_telemetry_execution(
+                execution_id,
+                None,
+                "failed",
+            )
+            raise
 
-        return len(resultados)
+    def start_telemetry_execution(
+        self,
+        monitoramento,
+        termo,
+        lojas_configuradas,
+    ):
+        if self.telemetry_service is None:
+            return None
+        try:
+            return self.telemetry_service.start_execution(
+                monitoramento["id"],
+                termo,
+                lojas_configuradas,
+            )
+        except Exception:
+            return None
+
+    def telemetry_observer(self, execution_id):
+        if self.telemetry_service is None or not execution_id:
+            return None
+        try:
+            return self.telemetry_service.store_observer(execution_id)
+        except Exception:
+            return None
+
+    def finish_telemetry_execution(
+        self,
+        execution_id,
+        aggregate_total,
+        status,
+    ):
+        if self.telemetry_service is None or not execution_id:
+            return False
+        try:
+            return self.telemetry_service.finish_execution(
+                execution_id,
+                aggregate_total,
+                status,
+            )
+        except Exception:
+            return False
 
     def notify_pending_alerts(self):
 
