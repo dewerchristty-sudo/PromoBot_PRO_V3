@@ -129,6 +129,9 @@ class SingleCycleResult:
     delivery_status: str
     attempt_status: str
     final_result: str
+    shadow_pipeline_enabled: bool
+    shadow_database_touched: bool
+    temporary_database_used: bool
     duration_seconds: float
 
     def as_dict(self):
@@ -171,12 +174,16 @@ class SingleCycleRunner:
         self.notifier = notifier
         self.clock = clock or time.monotonic
 
-    @staticmethod
-    def collect_store(term, store_name):
+    def collect_store(self, term, store_name):
         messages = []
         manager = StoreManager(
             progress_callback=messages.append,
             enabled_stores=[store_name],
+            offer_shadow_enabled=(
+                False
+                if self.config.mode == SingleCycleMode.DRY_RUN
+                else None
+            ),
         )
         products = manager.search_all(term)
         errors = [
@@ -487,8 +494,23 @@ class SingleCycleRunner:
             delivery_status=str(delivery_status or ""),
             attempt_status=str(attempt_status or ""),
             final_result=final_result,
+            shadow_pipeline_enabled=(
+                False
+                if self.config.mode == SingleCycleMode.DRY_RUN
+                else self.shadow_pipeline_enabled()
+            ),
+            shadow_database_touched=False,
+            temporary_database_used=(
+                self.config.mode == SingleCycleMode.DRY_RUN
+            ),
             duration_seconds=round(max(self.clock() - started, 0), 3),
         )
+
+    @staticmethod
+    def shadow_pipeline_enabled():
+        from src.offers.pipeline import OfferPipeline
+
+        return OfferPipeline.enabled()
 
     @staticmethod
     def price(product):

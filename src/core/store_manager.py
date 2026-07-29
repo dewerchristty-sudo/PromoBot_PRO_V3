@@ -20,11 +20,13 @@ class StoreManager:
         progress_callback: Optional[Callable[[str], None]] = None,
         enabled_stores: Optional[list[str]] = None,
         offer_pipeline=None,
+        offer_shadow_enabled: Optional[bool] = None,
     ) -> None:
 
         self.progress_callback = progress_callback
         self.enabled_stores = enabled_stores
         self.offer_pipeline = offer_pipeline
+        self.offer_shadow_enabled = offer_shadow_enabled
 
         self.stores = [
 
@@ -120,6 +122,8 @@ class StoreManager:
         try:
             from src.offers.pipeline import OfferPipeline
 
+            if self.offer_shadow_enabled is False:
+                return None
             if not OfferPipeline.enabled():
                 return None
 

@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from scripts.run_single_offer_cycle import parser
 from src.core.single_cycle_runner import (
@@ -14,6 +14,7 @@ from src.core.single_cycle_runner import (
     SingleCycleRunner,
     result_mask,
 )
+from src.core.store_manager import StoreManager
 from src.database import Database
 
 
@@ -302,9 +303,127 @@ class SingleCycleRunnerTest(unittest.TestCase):
             "title", "current_price", "previous_price", "discount_percent",
             "summarized_link", "masked_destination", "mode",
             "transport_calls", "delivery_status", "attempt_status",
-            "final_result", "duration_seconds",
+            "final_result", "shadow_pipeline_enabled",
+            "shadow_database_touched", "temporary_database_used",
+            "duration_seconds",
         }
         self.assertEqual(set(result.as_dict()), required)
+
+    def test_dry_run_disables_shadow_pipeline_without_touching_environment(self):
+        original = os.environ.get("OFFER_SHADOW_PIPELINE_ENABLED")
+        with patch.dict(
+            os.environ,
+            {"OFFER_SHADOW_PIPELINE_ENABLED": "True"},
+            clear=False,
+        ):
+            result = self.runner().run()
+            self.assertEqual(
+                os.environ["OFFER_SHADOW_PIPELINE_ENABLED"],
+                "True",
+            )
+        self.assertEqual(
+            os.environ.get("OFFER_SHADOW_PIPELINE_ENABLED"),
+            original,
+        )
+        self.assertFalse(result.shadow_pipeline_enabled)
+        self.assertFalse(result.shadow_database_touched)
+        self.assertTrue(result.temporary_database_used)
+
+    def test_dry_run_does_not_create_or_touch_shadow_database(self):
+        shadow = Path(self.tempdir.name) / "offer_shadow.db"
+        shadow.write_bytes(b"sentinel")
+        before = shadow.read_bytes()
+        with patch.dict(
+            os.environ,
+            {
+                "OFFER_SHADOW_PIPELINE_ENABLED": "True",
+                "OFFER_SHADOW_DB_PATH": str(shadow),
+            },
+            clear=False,
+        ):
+            self.runner().run()
+        self.assertEqual(shadow.read_bytes(), before)
+        self.assertFalse(Path(f"{shadow}-wal").exists())
+        self.assertFalse(Path(f"{shadow}-shm").exists())
+
+    def test_collection_exception_preserves_shadow_configuration(self):
+        with patch.dict(
+            os.environ,
+            {"OFFER_SHADOW_PIPELINE_ENABLED": "True"},
+            clear=False,
+        ):
+            result = self.runner(
+                collector=Mock(side_effect=RuntimeError("falha simulada"))
+            ).run()
+            self.assertEqual(
+                os.environ["OFFER_SHADOW_PIPELINE_ENABLED"],
+                "True",
+            )
+        self.assertEqual(result.final_result, "no_eligible_offer")
+        self.assertFalse(result.shadow_pipeline_enabled)
+
+    def test_real_mode_keeps_shadow_pipeline_configuration(self):
+        with patch.dict(
+            os.environ,
+            {"OFFER_SHADOW_PIPELINE_ENABLED": "True"},
+            clear=False,
+        ):
+            result = self.runner(
+                config=self.config(real_send=True),
+                transport=Mock(return_value=True),
+                database=self.database,
+            ).run()
+        self.assertTrue(result.shadow_pipeline_enabled)
+        self.assertFalse(result.temporary_database_used)
+
+    @patch("src.core.single_cycle_runner.StoreManager")
+    def test_dry_run_injects_shadow_pipeline_disabled(self, manager_class):
+        manager_class.return_value.search_all.return_value = []
+        self.runner().collect_store("produto controlado", "Amazon")
+        manager_class.assert_called_once_with(
+            progress_callback=ANY,
+            enabled_stores=["Amazon"],
+            offer_shadow_enabled=False,
+        )
+
+    @patch("src.core.single_cycle_runner.StoreManager")
+    def test_real_mode_preserves_store_manager_shadow_behavior(
+        self,
+        manager_class,
+    ):
+        manager_class.return_value.search_all.return_value = []
+        runner = self.runner(config=self.config(real_send=True))
+        runner.collect_store("produto controlado", "Amazon")
+        manager_class.assert_called_once_with(
+            progress_callback=ANY,
+            enabled_stores=["Amazon"],
+            offer_shadow_enabled=None,
+        )
+
+    def test_store_manager_none_preserves_environment_shadow_flag(self):
+        pipeline = Mock()
+        pipeline.process_batch.return_value.metrics = type(
+            "Metrics",
+            (),
+            {
+                "received_count": 1,
+                "queued_count": 1,
+                "selected_shadow_count": 0,
+            },
+        )()
+        with patch.dict(
+            os.environ,
+            {"OFFER_SHADOW_PIPELINE_ENABLED": "True"},
+            clear=False,
+        ):
+            manager = StoreManager(
+                enabled_stores=[],
+                offer_pipeline=pipeline,
+                offer_shadow_enabled=None,
+            )
+            result = manager.observe_offer_shadow([{"titulo": "Produto"}])
+        pipeline.process_batch.assert_called_once()
+        self.assertIs(result, pipeline.process_batch.return_value)
 
     def test_31_runner_ends_after_one_cycle(self):
         collector = Mock(side_effect=self.collector)
