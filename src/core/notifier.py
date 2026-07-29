@@ -18,12 +18,15 @@ from dotenv import load_dotenv
 from PIL import Image, ImageOps, UnidentifiedImageError
 from src.core.delivery_models import (
     DeliveryBatchResult,
+    DeliveryStatus,
     DestinationDelivery,
+    DestinationDeliveryResult,
     delivery_publication_key,
     mask_delivery_destination,
 )
 from src.core.delivery_service import DeliveryService
 from src.core.retry_policy import TransactionalRetryPolicy
+from src.core.transactional_canary import TransactionalCanaryConfig
 from src.database.delivery_repository import DeliveryRepository
 from src.stores.active import is_active_store
 
@@ -209,6 +212,73 @@ class Notifier:
             decision_origin=(
                 self.value(item, "origem_decisao", "legado") or "legado"
             ),
+        )
+
+    def transactional_canary_config(self):
+
+        return TransactionalCanaryConfig.from_environment()
+
+    def legacy_delivery_result(
+        self,
+        item,
+        channel,
+        destination,
+        *,
+        sent=False,
+        error="",
+        history_error="",
+        transport_result=None,
+    ):
+
+        delivery = self.transactional_delivery(item, channel, destination)
+        return DestinationDeliveryResult(
+            delivery_id=0,
+            delivery_key=f"legacy:{delivery.delivery_key}",
+            publication_key=delivery.publication_key,
+            channel=channel,
+            masked_destination=mask_delivery_destination(destination),
+            status=DeliveryStatus.SENT if sent else DeliveryStatus.FAILED,
+            sent=sent,
+            error=error,
+            external_id=DeliveryService.external_id(transport_result),
+            history_error=history_error,
+        )
+
+    def deliver_legacy_destination(
+        self,
+        item,
+        channel,
+        destination,
+        send,
+    ):
+
+        try:
+            transport_result = send()
+        except Exception as error:
+            safe_error = DeliveryService.safe_error(error, destination)
+            return self.legacy_delivery_result(
+                item,
+                channel,
+                destination,
+                error=safe_error,
+            )
+        history_error = ""
+        try:
+            self.record_single_delivery(
+                self.database,
+                item,
+                channel,
+                destination,
+            )
+        except Exception as error:
+            history_error = DeliveryService.safe_error(error, destination)
+        return self.legacy_delivery_result(
+            item,
+            channel,
+            destination,
+            sent=True,
+            history_error=history_error,
+            transport_result=transport_result,
         )
 
     def transactional_publication_key(self, item):
@@ -1171,6 +1241,15 @@ class Notifier:
         if not token or not chat_id:
             return False
 
+        canary = self.transactional_canary_config()
+        if canary.active(self.transactional_delivery_enabled()):
+            return self.send_telegram_canary_alerts(
+                alerts,
+                token,
+                chat_id,
+                canary,
+            )
+
         if self.transactional_delivery_enabled():
             results = []
             service = self.transactional_delivery_service()
@@ -1229,10 +1308,67 @@ class Notifier:
 
         return enviados > 0
 
+    def send_telegram_canary_alerts(self, alerts, token, chat_id, canary):
+
+        results = []
+        service = None
+        try:
+            for item in alerts[:10]:
+                imagem = (self.value(item, "imagem", "") or "").strip()
+                if not imagem.startswith("http"):
+                    continue
+                send = lambda item=item, imagem=imagem: (
+                    self.send_telegram_photo(
+                        token,
+                        chat_id,
+                        imagem,
+                        self.format_alert(item),
+                    )
+                )
+                if canary.authorizes(chat_id):
+                    service = service or self.transactional_delivery_service()
+                    results.append(service.deliver(
+                        self.transactional_delivery(
+                            item,
+                            "Telegram",
+                            chat_id,
+                        ),
+                        send=send,
+                        record_history=lambda item=item: (
+                            self.record_single_delivery(
+                                self.database,
+                                item,
+                                "Telegram",
+                                chat_id,
+                            )
+                        ),
+                        sanitized_metadata={
+                            "content_type": "image/url",
+                            "destination_masked": (
+                                mask_delivery_destination(chat_id)
+                            ),
+                        },
+                    ))
+                else:
+                    results.append(self.deliver_legacy_destination(
+                        item,
+                        "Telegram",
+                        chat_id,
+                        send,
+                    ))
+            return DeliveryBatchResult(tuple(results))
+        finally:
+            if service is not None:
+                self.close_transactional_delivery()
+
     def send_whatsapp_alerts(self, alerts):
 
         if not self.whatsapp_configured():
             return False
+
+        canary = self.transactional_canary_config()
+        if canary.active(self.transactional_delivery_enabled()):
+            return self.send_whatsapp_canary_alerts(alerts, canary)
 
         if self.transactional_delivery_enabled():
             results = []
@@ -1328,6 +1464,85 @@ class Notifier:
                 enviados += 1
 
         return enviados > 0
+
+    def send_whatsapp_canary_alerts(self, alerts, canary):
+
+        results = []
+        service = None
+        try:
+            for index, item in enumerate(alerts[:10]):
+                if index > 0:
+                    self.wait_between_notifications()
+                imagem_original = self.verified_whatsapp_image(item)
+                imagem_preparada = self.value(item, "imagem_whatsapp")
+                imagem = (
+                    imagem_preparada
+                    if self.evolution_configured() and imagem_preparada
+                    else imagem_original
+                )
+                if not (
+                    isinstance(imagem, (bytes, bytearray))
+                    or str(imagem).startswith("http")
+                ):
+                    logger.warning(
+                        "Envio bloqueado: nao foi possivel confirmar a imagem "
+                        "do produto %s.",
+                        self.value(item, "link", ""),
+                    )
+                    continue
+                for recipient in self.whatsapp_recipients_for_alert(item):
+                    if self.whatsapp_group_rate_limited(recipient):
+                        continue
+                    send = lambda item=item, imagem=imagem, recipient=recipient: (
+                        self.send_whatsapp_message(
+                            self.format_alert(item),
+                            imagem,
+                            recipient,
+                        )
+                    )
+                    if canary.authorizes(recipient):
+                        service = service or self.transactional_delivery_service()
+                        results.append(service.deliver(
+                            self.transactional_delivery(
+                                item,
+                                "WhatsApp",
+                                recipient,
+                            ),
+                            send=send,
+                            record_history=lambda item=item,
+                            recipient=recipient: self.record_single_delivery(
+                                self.database,
+                                item,
+                                "WhatsApp",
+                                recipient,
+                            ),
+                            sanitized_metadata={
+                                "content_type": (
+                                    "image/bytes"
+                                    if isinstance(imagem, (bytes, bytearray))
+                                    else "image/url"
+                                ),
+                                "size_bytes": (
+                                    len(imagem)
+                                    if isinstance(imagem, (bytes, bytearray))
+                                    else 0
+                                ),
+                                "destination_masked": (
+                                    mask_delivery_destination(recipient)
+                                ),
+                            },
+                        ))
+                    else:
+                        results.append(self.deliver_legacy_destination(
+                            item,
+                            "WhatsApp",
+                            recipient,
+                            send,
+                        ))
+            return DeliveryBatchResult(tuple(results))
+        finally:
+            if service is not None:
+                self.close_transactional_delivery()
 
     def verified_whatsapp_image(self, item):
         """Confirma na Shopee que a foto pertence ao ID do anúncio.
