@@ -10,6 +10,7 @@ from src.core.delivery_models import (
     DestinationDelivery,
     validate_delivery_transition,
 )
+from src.core.retry_policy import RetryDisposition
 
 
 class DeliveryRepository:
@@ -131,6 +132,252 @@ class DeliveryRepository:
                 LIMIT ?
             """, params).fetchall()
         return [self.to_delivery(row) for row in rows]
+
+    def list_due_retries(self, now=None, max_attempts=5, limit=10):
+        now = self.iso(now or self.clock())
+        max_attempts = max(int(max_attempts), 1)
+        limit = max(int(limit), 1)
+        with self.lock:
+            rows = self.conn.execute("""
+                SELECT * FROM entregas_destino
+                WHERE status=?
+                  AND proxima_tentativa IS NOT NULL
+                  AND proxima_tentativa<=?
+                  AND tentativas<?
+                ORDER BY proxima_tentativa, id
+                LIMIT ?
+            """, (
+                DeliveryStatus.WAITING_RETRY.value,
+                now,
+                max_attempts,
+                limit,
+            )).fetchall()
+        return [self.to_delivery(row) for row in rows]
+
+    def reserve_retry(self, delivery_id, now=None, max_attempts=5):
+        now = self.iso(now or self.clock())
+        max_attempts = max(int(max_attempts), 1)
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute("""
+                    SELECT tentativas FROM entregas_destino
+                    WHERE id=? AND status=?
+                      AND proxima_tentativa IS NOT NULL
+                      AND proxima_tentativa<=?
+                      AND tentativas<?
+                """, (
+                    int(delivery_id),
+                    DeliveryStatus.WAITING_RETRY.value,
+                    now,
+                    max_attempts,
+                )).fetchone()
+                if row is None:
+                    self.conn.rollback()
+                    return None
+                attempt_number = int(row["tentativas"]) + 1
+                updated = self.conn.execute("""
+                    UPDATE entregas_destino
+                    SET status=?, tentativas=?, atualizado_em=?,
+                        proxima_tentativa=NULL, ultimo_erro='',
+                        erro_temporario=NULL
+                    WHERE id=? AND status=?
+                """, (
+                    DeliveryStatus.SENDING.value,
+                    attempt_number,
+                    now,
+                    int(delivery_id),
+                    DeliveryStatus.WAITING_RETRY.value,
+                ))
+                if updated.rowcount != 1:
+                    self.conn.rollback()
+                    return None
+                cursor = self.conn.execute("""
+                    INSERT INTO tentativas_entrega(
+                        entrega_id, numero_tentativa, iniciada_em, status,
+                        metadados_sanitizados
+                    ) VALUES(?,?,?,?,?)
+                """, (
+                    int(delivery_id),
+                    attempt_number,
+                    now,
+                    DeliveryStatus.SENDING.value,
+                    "",
+                ))
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return self.get_attempt(cursor.lastrowid)
+
+    def update_attempt_metadata(self, attempt_id, metadata):
+        with self.lock:
+            self.conn.execute("""
+                UPDATE tentativas_entrega
+                SET metadados_sanitizados=?
+                WHERE id=? AND status=?
+            """, (
+                self.safe_metadata(metadata),
+                int(attempt_id),
+                DeliveryStatus.SENDING.value,
+            ))
+            self.conn.commit()
+
+    def history_exists(self, delivery):
+        with self.lock:
+            table = self.conn.execute("""
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='historico_envios'
+            """).fetchone()
+            if not table:
+                return False
+            row = self.conn.execute("""
+                SELECT 1 FROM historico_envios
+                WHERE link_original=? AND canal=? AND destino=?
+                  AND status='enviado'
+                LIMIT 1
+            """, (
+                delivery.original_link,
+                delivery.channel,
+                delivery.destination,
+            )).fetchone()
+        return row is not None
+
+    def finish_reserved_failure(
+        self,
+        delivery_id,
+        disposition,
+        error,
+        policy,
+        now=None,
+    ):
+        disposition = RetryDisposition(disposition)
+        now_value = now or self.clock()
+        now_iso = self.iso(now_value)
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                delivery = self.conn.execute("""
+                    SELECT status, tentativas FROM entregas_destino
+                    WHERE id=?
+                """, (int(delivery_id),)).fetchone()
+                if not delivery:
+                    raise KeyError(f"Entrega {delivery_id} nao encontrada.")
+                if delivery["status"] != DeliveryStatus.SENDING.value:
+                    raise RuntimeError("Entrega nao esta reservada para envio.")
+                attempt = self.conn.execute("""
+                    SELECT id FROM tentativas_entrega
+                    WHERE entrega_id=? AND numero_tentativa=? AND status=?
+                """, (
+                    int(delivery_id),
+                    int(delivery["tentativas"]),
+                    DeliveryStatus.SENDING.value,
+                )).fetchone()
+                if not attempt:
+                    raise RuntimeError("Tentativa reservada nao encontrada.")
+
+                attempts = int(delivery["tentativas"])
+                if disposition == RetryDisposition.UNCERTAIN:
+                    delivery_status = DeliveryStatus.REVIEW_REQUIRED
+                    attempt_status = DeliveryStatus.REVIEW_REQUIRED
+                    temporary = None
+                    next_attempt = None
+                elif (
+                    disposition == RetryDisposition.TEMPORARY
+                    and policy.can_retry(attempts)
+                ):
+                    delivery_status = DeliveryStatus.WAITING_RETRY
+                    attempt_status = DeliveryStatus.FAILED
+                    temporary = True
+                    next_attempt = self.iso(
+                        policy.next_attempt_at(attempts, now_value)
+                    )
+                else:
+                    delivery_status = DeliveryStatus.DEFINITIVE_FAILURE
+                    attempt_status = DeliveryStatus.FAILED
+                    temporary = (
+                        disposition == RetryDisposition.TEMPORARY
+                    )
+                    next_attempt = None
+
+                self.conn.execute("""
+                    UPDATE tentativas_entrega
+                    SET finalizada_em=?, status=?, erro=?,
+                        erro_temporario=?
+                    WHERE id=?
+                """, (
+                    now_iso,
+                    attempt_status.value,
+                    str(error or ""),
+                    self.boolean(temporary),
+                    attempt["id"],
+                ))
+                self.conn.execute("""
+                    UPDATE entregas_destino
+                    SET status=?, atualizado_em=?, proxima_tentativa=?,
+                        ultimo_erro=?, erro_temporario=?
+                    WHERE id=?
+                """, (
+                    delivery_status.value,
+                    now_iso,
+                    next_attempt,
+                    str(error or ""),
+                    self.boolean(temporary),
+                    int(delivery_id),
+                ))
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return self.get(delivery_id)
+
+    def prepare_manual_retry(
+        self,
+        delivery_id,
+        *,
+        confirm_definitive=False,
+        now=None,
+    ):
+        now = self.iso(now or self.clock())
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute(
+                    "SELECT status FROM entregas_destino WHERE id=?",
+                    (int(delivery_id),),
+                ).fetchone()
+                if not row:
+                    raise KeyError(f"Entrega {delivery_id} nao encontrada.")
+                status = DeliveryStatus(row["status"])
+                allowed = {
+                    DeliveryStatus.FAILED,
+                    DeliveryStatus.WAITING_RETRY,
+                }
+                if (
+                    status == DeliveryStatus.DEFINITIVE_FAILURE
+                    and confirm_definitive
+                ):
+                    allowed.add(DeliveryStatus.DEFINITIVE_FAILURE)
+                if status not in allowed:
+                    raise ValueError(
+                        f"Retry manual nao permitido para {status.value}."
+                    )
+                self.conn.execute("""
+                    UPDATE entregas_destino
+                    SET status=?, proxima_tentativa=?, atualizado_em=?,
+                        erro_temporario=1
+                    WHERE id=?
+                """, (
+                    DeliveryStatus.WAITING_RETRY.value,
+                    now,
+                    now,
+                    int(delivery_id),
+                ))
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return self.get(delivery_id)
 
     def transition(self, delivery_id, target, **fields):
         target = DeliveryStatus(target)

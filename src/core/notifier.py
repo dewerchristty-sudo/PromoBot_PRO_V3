@@ -23,6 +23,7 @@ from src.core.delivery_models import (
     mask_delivery_destination,
 )
 from src.core.delivery_service import DeliveryService
+from src.core.retry_policy import TransactionalRetryPolicy
 from src.database.delivery_repository import DeliveryRepository
 from src.stores.active import is_active_store
 
@@ -182,7 +183,10 @@ class Notifier:
             repository.close()
             raise
         self._delivery_repository = repository
-        self._delivery_service = DeliveryService(repository)
+        self._delivery_service = DeliveryService(
+            repository,
+            retry_policy=TransactionalRetryPolicy.from_environment(),
+        )
         return self._delivery_service
 
     def close_transactional_delivery(self):

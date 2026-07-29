@@ -7,7 +7,14 @@ from pathlib import Path
 
 from src.core.browser_manager import BrowserManager
 from src.core.notifier import Notifier
+from src.core.delivery_models import mask_delivery_destination
+from src.core.delivery_retry_service import (
+    RetryExecution,
+    TransactionalRetryService,
+)
+from src.core.retry_policy import TransactionalRetryPolicy
 from src.core.store_manager import StoreManager
+from src.database.delivery_repository import DeliveryRepository
 from src.database.offer_pipeline_repository import OfferPipelineRepository
 from src.offers.activation import OfferActivationFlags
 from src.offers.activation_control import OfferActivationManager
@@ -112,6 +119,7 @@ class MonitorRunner:
 
     def _run_once_unlocked(self):
 
+        self.process_transactional_retries()
         self.retry_notification_queue()
         self.notify_pending_alerts()
 
@@ -148,6 +156,7 @@ class MonitorRunner:
     def run_due_batch(self):
 
         with self.execution_lock:
+            self.process_transactional_retries()
             self.retry_notification_queue()
             self.notify_pending_alerts()
 
@@ -176,6 +185,102 @@ class MonitorRunner:
             )
             self.health["last_error"] = ""
             return total
+
+    @staticmethod
+    def transactional_retry_enabled():
+        delivery = os.getenv(
+            "ENABLE_TRANSACTIONAL_DELIVERY",
+            "false",
+        ).strip().casefold() in {"1", "true", "yes", "on", "sim"}
+        retry = TransactionalRetryPolicy.from_environment()
+        return delivery and retry.enabled
+
+    def process_transactional_retries(self):
+        if not self.transactional_retry_enabled():
+            return ()
+        repository = DeliveryRepository(self.database.db)
+        try:
+            repository.migrate()
+            service = TransactionalRetryService(
+                repository,
+                TransactionalRetryPolicy.from_environment(),
+            )
+            return service.process_due(self.retry_execution)
+        finally:
+            repository.close()
+
+    def retry_execution(self, delivery):
+        item = self.database.buscar_produto_por_link(
+            delivery.original_link
+        )
+        if item is None:
+            raise ValueError(
+                "Validacao local permanente: produto do retry nao encontrado."
+            )
+        message = self.notifier.format_alert(item)
+        if delivery.channel.casefold() == "whatsapp":
+            image = self.notifier.verified_whatsapp_image(item)
+            prepared = self.notifier.value(item, "imagem_whatsapp")
+            if self.notifier.evolution_configured() and prepared:
+                image = prepared
+            return RetryExecution(
+                send=lambda: self.notifier.send_whatsapp_message(
+                    message,
+                    image,
+                    delivery.destination,
+                ),
+                record_history=lambda: self.notifier.record_single_delivery(
+                    self.database,
+                    item,
+                    "WhatsApp",
+                    delivery.destination,
+                ),
+                sanitized_metadata={
+                    "content_type": (
+                        "image/bytes"
+                        if isinstance(image, (bytes, bytearray))
+                        else "image/url"
+                    ),
+                    "size_bytes": (
+                        len(image)
+                        if isinstance(image, (bytes, bytearray))
+                        else 0
+                    ),
+                    "destination_masked": mask_delivery_destination(
+                        delivery.destination
+                    ),
+                },
+            )
+        if delivery.channel.casefold() == "telegram":
+            token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+            image = self.notifier.value(item, "imagem", "") or ""
+            if not token or not image:
+                raise ValueError(
+                    "Validacao local permanente: Telegram incompleto."
+                )
+            return RetryExecution(
+                send=lambda: self.notifier.send_telegram_photo(
+                    token,
+                    delivery.destination,
+                    image,
+                    message,
+                ),
+                record_history=lambda: self.notifier.record_single_delivery(
+                    self.database,
+                    item,
+                    "Telegram",
+                    delivery.destination,
+                ),
+                sanitized_metadata={
+                    "content_type": "image/url",
+                    "destination_masked": mask_delivery_destination(
+                        delivery.destination
+                    ),
+                },
+            )
+        raise ValueError(
+            "Validacao local permanente: canal de retry nao suportado."
+        )
 
     @staticmethod
     def monitoramento_devido(monitoramento, agora=None):

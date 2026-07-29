@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import re
 from typing import Any
 
 from src.core.delivery_models import (
@@ -12,8 +13,9 @@ from src.core.delivery_models import (
 class DeliveryService:
     """Executa uma entrega isolada sem conhecer Notifier ou transportes."""
 
-    def __init__(self, repository):
+    def __init__(self, repository, retry_policy=None):
         self.repository = repository
+        self.retry_policy = retry_policy
 
     def deliver(
         self,
@@ -51,12 +53,21 @@ class DeliveryService:
             transport_result = send()
         except Exception as error:
             safe_error = self.safe_error(error, stored.destination)
-            failed = self.repository.finish_attempt(
-                stored.id,
-                DeliveryStatus.FAILED,
-                error=safe_error,
-                temporary_error=None,
-            )
+            if self.retry_policy is not None and self.retry_policy.enabled:
+                classification = self.retry_policy.classify(error)
+                failed = self.repository.finish_reserved_failure(
+                    stored.id,
+                    classification.disposition,
+                    safe_error,
+                    self.retry_policy,
+                )
+            else:
+                failed = self.repository.finish_attempt(
+                    stored.id,
+                    DeliveryStatus.FAILED,
+                    error=safe_error,
+                    temporary_error=None,
+                )
             return self.result(
                 failed,
                 masked,
@@ -134,4 +145,26 @@ class DeliveryService:
                 destination,
                 mask_delivery_destination(destination),
             )
-        return text[:1000]
+        text = re.sub(
+            r"(?i)\b(api[-_ ]?key|token|password|senha|authorization|"
+            r"cookie|secret)\b\s*[:=]\s*[^,;\s]+",
+            r"\1=[REMOVIDO]",
+            text,
+        )
+        text = re.sub(
+            r"(?i)\b(https?://)([^/@\s:]+):([^/@\s]+)@",
+            r"\1[REMOVIDO]@",
+            text,
+        )
+        text = re.sub(
+            r"(?i)\b(payload|body|headers?)\b\s*[:=]\s*"
+            r"(\{.*?\}|\[.*?\]|[^;]+)",
+            r"\1=[REMOVIDO]",
+            text,
+        )
+        text = re.sub(
+            r"\b[A-Za-z0-9+/]{120,}={0,2}\b",
+            "[BASE64_REMOVIDO]",
+            text,
+        )
+        return " ".join(text.split())[:1000]
