@@ -86,6 +86,24 @@ def delivery_idempotency_key(publication_key, channel, destination):
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def delivery_publication_key(
+    alert_id="",
+    original_link="",
+    signature="",
+    price="",
+):
+    parts = (
+        str(alert_id or "").strip(),
+        str(original_link or "").strip(),
+        str(signature or "").strip().casefold(),
+        str(price or "").strip(),
+    )
+    if not any(parts):
+        raise ValueError("A publicacao precisa de uma identidade.")
+    material = "\x1f".join(("promobot-publication-v1", *parts))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def mask_delivery_destination(destination):
     normalized = normalize_delivery_destination(destination)
     if "@" in normalized:
@@ -151,6 +169,68 @@ class DeliveryAttempt:
     temporary_error: bool | None = None
     external_id: str = ""
     sanitized_metadata: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationDeliveryResult:
+    delivery_id: int
+    delivery_key: str
+    publication_key: str
+    channel: str
+    masked_destination: str
+    status: DeliveryStatus
+    attempt_number: int = 0
+    sent: bool = False
+    already_sent: bool = False
+    error: str = ""
+    external_id: str = ""
+    history_error: str = ""
+
+    @property
+    def completed(self):
+        return self.sent or self.already_sent
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryBatchResult:
+    deliveries: tuple[DestinationDeliveryResult, ...] = ()
+
+    def __bool__(self):
+        return any(item.completed for item in self.deliveries)
+
+    @property
+    def sent_count(self):
+        return sum(item.sent for item in self.deliveries)
+
+    @property
+    def already_sent_count(self):
+        return sum(item.already_sent for item in self.deliveries)
+
+    @property
+    def failed_count(self):
+        return sum(not item.completed for item in self.deliveries)
+
+    @property
+    def completed_publication_keys(self):
+        return frozenset(
+            item.publication_key
+            for item in self.deliveries
+            if item.completed
+        )
+
+    @property
+    def errors(self):
+        return tuple(
+            item.error for item in self.deliveries
+            if item.error
+        )
+
+    @property
+    def history_errors(self):
+        return tuple(
+            item.history_error for item in self.deliveries
+            if item.history_error
+        )
 
 
 def utc_now():

@@ -16,6 +16,14 @@ from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
 from PIL import Image, ImageOps, UnidentifiedImageError
+from src.core.delivery_models import (
+    DeliveryBatchResult,
+    DestinationDelivery,
+    delivery_publication_key,
+    mask_delivery_destination,
+)
+from src.core.delivery_service import DeliveryService
+from src.database.delivery_repository import DeliveryRepository
 from src.stores.active import is_active_store
 
 logger = logging.getLogger(__name__)
@@ -130,10 +138,12 @@ class Notifier:
         "\U0001f680 SUPEROFERTA NO AR! N\u00e3o deixe passar!",
     )
 
-    def __init__(self, database=None):
+    def __init__(self, database=None, delivery_service=None):
 
         load_dotenv()
         self.database = database
+        self._delivery_service = delivery_service
+        self._delivery_repository = None
         self._last_headline = None
         self._headline_queue = []
 
@@ -148,6 +158,71 @@ class Notifier:
             channels.append("WhatsApp")
 
         return channels
+
+    @staticmethod
+    def transactional_delivery_enabled():
+
+        return os.getenv(
+            "ENABLE_TRANSACTIONAL_DELIVERY",
+            "false",
+        ).strip().casefold() in {"1", "true", "yes", "on", "sim"}
+
+    def transactional_delivery_service(self):
+
+        if self._delivery_service is not None:
+            return self._delivery_service
+        if self.database is None or not getattr(self.database, "db", None):
+            raise RuntimeError(
+                "Banco indisponivel para a entrega transacional."
+            )
+        repository = DeliveryRepository(self.database.db)
+        try:
+            repository.migrate()
+        except Exception:
+            repository.close()
+            raise
+        self._delivery_repository = repository
+        self._delivery_service = DeliveryService(repository)
+        return self._delivery_service
+
+    def close_transactional_delivery(self):
+
+        if self._delivery_repository is not None:
+            self._delivery_repository.close()
+            self._delivery_repository = None
+            self._delivery_service = None
+
+    def transactional_delivery(self, item, channel, destination):
+
+        publication_key = self.transactional_publication_key(item)
+        return DestinationDelivery.create(
+            publication_key,
+            channel,
+            destination,
+            alert_id=self.value(item, "alerta_id"),
+            original_link=self.value(item, "link", "") or "",
+            signature=self.value(item, "assinatura", "") or "",
+            decision_origin=(
+                self.value(item, "origem_decisao", "legado") or "legado"
+            ),
+        )
+
+    def transactional_publication_key(self, item):
+
+        return delivery_publication_key(
+            alert_id=self.value(item, "alerta_id", ""),
+            original_link=self.value(item, "link", ""),
+            signature=self.value(item, "assinatura", ""),
+            price=self.value(item, "preco_valor", self.value(item, "preco", "")),
+        )
+
+    def transactional_delivered_alerts(self, alerts, result):
+
+        completed = result.completed_publication_keys
+        return [
+            alert for alert in alerts
+            if self.transactional_publication_key(alert) in completed
+        ]
 
     def send_alerts(
         self,
@@ -234,28 +309,63 @@ class Notifier:
         errors = []
         delivered_alerts = []
         history_error = False
+        transactional = self.transactional_delivery_enabled()
 
         try:
-            if self.send_telegram_alerts(telegram_alerts):
+            telegram_result = self.send_telegram_alerts(telegram_alerts)
+            if telegram_result:
                 sent.append("Telegram")
-                delivered_alerts.extend(telegram_alerts)
-                if database is not None:
+                if isinstance(telegram_result, DeliveryBatchResult):
+                    delivered_alerts.extend(
+                        self.transactional_delivered_alerts(
+                            telegram_alerts,
+                            telegram_result,
+                        )
+                    )
+                    history_error = (
+                        history_error or bool(telegram_result.history_errors)
+                    )
+                else:
+                    delivered_alerts.extend(telegram_alerts)
+                if (
+                    database is not None
+                    and not isinstance(telegram_result, DeliveryBatchResult)
+                ):
                     try:
                         self.record_deliveries(database, telegram_alerts, ["Telegram"])
                     except Exception:
                         history_error = True
+            if isinstance(telegram_result, DeliveryBatchResult):
+                errors.extend(telegram_result.errors)
         except Exception as error:
             errors.append(f"Telegram: {error}")
 
         try:
-            if self.send_whatsapp_alerts(whatsapp_alerts):
+            whatsapp_result = self.send_whatsapp_alerts(whatsapp_alerts)
+            if whatsapp_result:
                 sent.append("WhatsApp")
-                delivered_alerts.extend(whatsapp_alerts)
-                if database is not None:
+                if isinstance(whatsapp_result, DeliveryBatchResult):
+                    delivered_alerts.extend(
+                        self.transactional_delivered_alerts(
+                            whatsapp_alerts,
+                            whatsapp_result,
+                        )
+                    )
+                    history_error = (
+                        history_error or bool(whatsapp_result.history_errors)
+                    )
+                else:
+                    delivered_alerts.extend(whatsapp_alerts)
+                if (
+                    database is not None
+                    and not isinstance(whatsapp_result, DeliveryBatchResult)
+                ):
                     try:
                         self.record_deliveries(database, whatsapp_alerts, ["WhatsApp"])
                     except Exception:
                         history_error = True
+            if isinstance(whatsapp_result, DeliveryBatchResult):
+                errors.extend(whatsapp_result.errors)
         except Exception as error:
             errors.append(f"WhatsApp: {error}")
 
@@ -292,6 +402,8 @@ class Notifier:
                 result += f" | {len(unrouted_alerts)} sem categoria segura"
             if history_error:
                 result += " | aviso: falha ao registrar historico local"
+            if transactional and errors:
+                result += f" | {len(errors)} falha(s) isolada(s) por destino"
 
             return result
 
@@ -635,6 +747,9 @@ class Notifier:
 
     def record_deliveries(self, database, alerts, channels):
 
+        if self.transactional_delivery_enabled():
+            return
+
         for alert in alerts:
             original_link = self.value(alert, "link", "") or ""
             affiliate_link = self.affiliate_link(alert)
@@ -658,6 +773,22 @@ class Notifier:
                         channel,
                         destination,
                     )
+
+    def record_single_delivery(self, database, alert, channel, destination):
+
+        original_link = self.value(alert, "link", "") or ""
+        affiliate_link = self.affiliate_link(alert)
+        label = database.etiqueta_link_afiliado(original_link)
+        label = label if isinstance(label, str) else ""
+        database.registrar_envio(
+            self.value(alert, "loja", "") or "",
+            self.value(alert, "titulo", "") or "",
+            original_link,
+            affiliate_link,
+            label,
+            channel,
+            destination,
+        )
 
     def format_alert(self, item):
 
@@ -1036,6 +1167,48 @@ class Notifier:
         if not token or not chat_id:
             return False
 
+        if self.transactional_delivery_enabled():
+            results = []
+            service = self.transactional_delivery_service()
+            try:
+                for item in alerts[:10]:
+                    imagem = (self.value(item, "imagem", "") or "").strip()
+                    if not imagem.startswith("http"):
+                        continue
+                    delivery = self.transactional_delivery(
+                        item,
+                        "Telegram",
+                        chat_id,
+                    )
+                    results.append(service.deliver(
+                        delivery,
+                        send=lambda item=item, imagem=imagem: (
+                            self.send_telegram_photo(
+                                token,
+                                chat_id,
+                                imagem,
+                                self.format_alert(item),
+                            )
+                        ),
+                        record_history=lambda item=item: (
+                            self.record_single_delivery(
+                                self.database,
+                                item,
+                                "Telegram",
+                                chat_id,
+                            )
+                        ),
+                        sanitized_metadata={
+                            "content_type": "image/url",
+                            "destination_masked": (
+                                mask_delivery_destination(chat_id)
+                            ),
+                        },
+                    ))
+                return DeliveryBatchResult(tuple(results))
+            finally:
+                self.close_transactional_delivery()
+
         enviados = 0
 
         for item in alerts[:10]:
@@ -1056,6 +1229,68 @@ class Notifier:
 
         if not self.whatsapp_configured():
             return False
+
+        if self.transactional_delivery_enabled():
+            results = []
+            service = self.transactional_delivery_service()
+            try:
+                for index, item in enumerate(alerts[:10]):
+                    if index > 0:
+                        self.wait_between_notifications()
+                    imagem_original = self.verified_whatsapp_image(item)
+                    imagem_preparada = self.value(item, "imagem_whatsapp")
+                    imagem = (
+                        imagem_preparada
+                        if self.evolution_configured() and imagem_preparada
+                        else imagem_original
+                    )
+                    if not (
+                        isinstance(imagem, (bytes, bytearray))
+                        or str(imagem).startswith("http")
+                    ):
+                        continue
+                    for recipient in self.whatsapp_recipients_for_alert(item):
+                        if self.whatsapp_group_rate_limited(recipient):
+                            continue
+                        delivery = self.transactional_delivery(
+                            item,
+                            "WhatsApp",
+                            recipient,
+                        )
+                        results.append(service.deliver(
+                            delivery,
+                            send=lambda item=item, imagem=imagem,
+                            recipient=recipient: self.send_whatsapp_message(
+                                self.format_alert(item),
+                                imagem,
+                                recipient,
+                            ),
+                            record_history=lambda item=item,
+                            recipient=recipient: self.record_single_delivery(
+                                self.database,
+                                item,
+                                "WhatsApp",
+                                recipient,
+                            ),
+                            sanitized_metadata={
+                                "content_type": (
+                                    "image/bytes"
+                                    if isinstance(imagem, (bytes, bytearray))
+                                    else "image/url"
+                                ),
+                                "size_bytes": (
+                                    len(imagem)
+                                    if isinstance(imagem, (bytes, bytearray))
+                                    else 0
+                                ),
+                                "destination_masked": (
+                                    mask_delivery_destination(recipient)
+                                ),
+                            },
+                        ))
+                return DeliveryBatchResult(tuple(results))
+            finally:
+                self.close_transactional_delivery()
 
         enviados = 0
 
