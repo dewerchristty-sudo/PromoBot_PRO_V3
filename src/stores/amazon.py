@@ -7,10 +7,16 @@ from urllib.parse import parse_qs
 from urllib.parse import unquote
 from urllib.parse import urlparse
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from src.stores.base_store import BaseStore
 
 
 logger = logging.getLogger(__name__)
+
+
+class AmazonSearchUnavailable(RuntimeError):
+    """Indica bloqueio ou página de busca estruturalmente inválida."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +27,21 @@ class AmazonPreviousPrice:
 
 
 class Amazon(BaseStore):
+
+    SEARCH_RESULT_SELECTOR = "div[data-component-type='s-search-result']"
+    SEARCH_RESULT_FALLBACK_SELECTORS = (
+        "div.s-result-item[data-asin]",
+        ".s-main-slot .s-result-item",
+        "[data-asin]:not([data-asin=''])",
+    )
+    SEARCH_RESULTS_TIMEOUT_MS = 8000
+    MINIMUM_SEARCH_HTML_LENGTH = 3000
+    VALID_EMPTY_MARKERS = (
+        "nenhum resultado",
+        "não encontramos resultados",
+        "nao encontramos resultados",
+        "no results for",
+    )
 
     CURRENT_PRICE_SELECTORS = (
         "#corePrice_feature_div .priceToPay .a-offscreen",
@@ -246,6 +267,89 @@ class Amazon(BaseStore):
 
     # ======================================================
 
+    @classmethod
+    def search_page_classification(cls, status, title, html):
+        soup = BeautifulSoup(html or "", "lxml")
+        text = " ".join((
+            str(title or ""),
+            soup.get_text(" ", strip=True),
+        )).casefold()
+        if int(status or 0) == 429:
+            return "HTTP_429"
+        if int(status or 0) == 503:
+            return "HTTP_503"
+        if int(status or 0) >= 400:
+            return f"HTTP_{int(status)}"
+        if "robot check" in text:
+            return "ROBOT_CHECK"
+        if (
+            "captcha" in text
+            or soup.select_one(
+                "form[action*='validateCaptcha'], #captchacharacters"
+            )
+        ):
+            return "CAPTCHA"
+        if "algo deu errado" in text:
+            return "ERROR_PAGE"
+        cards, _selector = cls.search_cards(soup)
+        if cards:
+            return "VALID_PRODUCTS"
+        has_search_area = bool(soup.select_one("#search, .s-main-slot"))
+        if has_search_area and any(
+            marker in text for marker in cls.VALID_EMPTY_MARKERS
+        ):
+            return "VALID_EMPTY"
+        if len(html or "") < cls.MINIMUM_SEARCH_HTML_LENGTH:
+            return "INCOMPLETE_HTML"
+        if not has_search_area:
+            return "MISSING_SEARCH_STRUCTURE"
+        return "SEARCH_DOM_CHANGED"
+
+    @classmethod
+    def search_cards(cls, soup):
+        cards = soup.select(cls.SEARCH_RESULT_SELECTOR)
+        if cards:
+            return cards, cls.SEARCH_RESULT_SELECTOR
+        for selector in cls.SEARCH_RESULT_FALLBACK_SELECTORS:
+            cards = [
+                card for card in soup.select(selector)
+                if str(card.get("data-asin") or "").strip()
+            ]
+            if cards:
+                return cards, selector
+        return [], cls.SEARCH_RESULT_SELECTOR
+
+    @staticmethod
+    def search_error_message(classification, status):
+        if classification.startswith("HTTP_"):
+            return (
+                "Amazon indisponivel no modo headless: "
+                f"HTTP {int(status or 0)}."
+            )
+        labels = {
+            "ROBOT_CHECK": "Robot Check",
+            "CAPTCHA": "captcha",
+            "ERROR_PAGE": "pagina de erro",
+            "INCOMPLETE_HTML": "HTML incompleto",
+            "MISSING_SEARCH_STRUCTURE": "estrutura de busca ausente",
+            "SEARCH_DOM_CHANGED": "estrutura de busca inesperada",
+        }
+        return (
+            "Amazon indisponivel no modo headless: "
+            f"{labels.get(classification, 'pagina invalida')}."
+        )
+
+    @classmethod
+    def validate_search_page(cls, status, title, html):
+        classification = cls.search_page_classification(
+            status, title, html
+        )
+        if classification not in {"VALID_PRODUCTS", "VALID_EMPTY"}:
+            raise AmazonSearchUnavailable(
+                cls.search_error_message(classification, status)
+            )
+        return classification
+
     def search(self, product):
 
         resultados = []
@@ -261,28 +365,77 @@ class Amazon(BaseStore):
             print(f"\n>>> {self.name}")
             print(f"Abrindo: {url}")
 
-            page.goto(
+            response = page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=60000
             )
 
-            page.wait_for_timeout(5000)
-
-            soup = BeautifulSoup(
-                page.content(),
-                "lxml"
+            status = response.status if response is not None else 0
+            title = page.title()
+            initial_html = page.content()
+            initial_classification = self.search_page_classification(
+                status, title, initial_html
             )
+            if initial_classification not in {
+                "VALID_PRODUCTS", "VALID_EMPTY",
+                "INCOMPLETE_HTML", "MISSING_SEARCH_STRUCTURE",
+                "SEARCH_DOM_CHANGED",
+            }:
+                logger.warning(
+                    "amazon search status=%s classification=%s "
+                    "raw_cards=0 analyzed=0 missing_title=0 "
+                    "missing_link=0 missing_price=0 "
+                    "extraction_errors=0 accepted=0",
+                    status,
+                    initial_classification,
+                )
+                raise AmazonSearchUnavailable(
+                    self.search_error_message(
+                        initial_classification, status
+                    )
+                )
 
-            produtos = soup.select(
-                "div[data-component-type='s-search-result']"
+            try:
+                page.wait_for_selector(
+                    self.SEARCH_RESULT_SELECTOR,
+                    timeout=self.SEARCH_RESULTS_TIMEOUT_MS,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            html = page.content()
+            title = page.title()
+            classification = self.validate_search_page(
+                status, title, html
             )
+            soup = BeautifulSoup(html, "lxml")
+
+            produtos, selector = self.search_cards(soup)
 
             print(f"Produtos encontrados: {len(produtos)}")
+            logger.info(
+                "amazon search status=%s classification=%s "
+                "raw_cards=%d selector=%s",
+                status,
+                classification,
+                len(produtos),
+                selector,
+            )
+
+            counters = {
+                "analyzed": 0,
+                "missing_title": 0,
+                "missing_link": 0,
+                "missing_price": 0,
+                "extraction_errors": 0,
+                "accepted": 0,
+            }
 
             for item in produtos[:20]:
 
                 try:
+                    counters["analyzed"] += 1
 
                     titulo = item.select_one("h2 span")
                     preco = (
@@ -296,12 +449,19 @@ class Amazon(BaseStore):
 
                     titulo_texto = titulo.get_text(strip=True) if titulo else ""
 
-                    if not titulo_texto or not link:
+                    if not titulo_texto:
+                        counters["missing_title"] += 1
+                        continue
+                    if not link:
+                        counters["missing_link"] += 1
                         continue
 
                     preco_texto = self.normalize_price(
                         preco.get_text(strip=True) if preco else ""
                     )
+                    if not preco_texto:
+                        counters["missing_price"] += 1
+                        continue
                     extraction = self.previous_price_from_soup(
                         item, preco_texto, explicit_source="SEARCH_CARD"
                     )
@@ -326,10 +486,23 @@ class Amazon(BaseStore):
                         resultado["preco_antigo"] = extraction.value
 
                     resultados.append(resultado)
+                    counters["accepted"] += 1
 
                 except Exception:
+                    counters["extraction_errors"] += 1
                     continue
 
+            logger.info(
+                "amazon search extraction analyzed=%d missing_title=%d "
+                "missing_link=%d missing_price=%d extraction_errors=%d "
+                "accepted=%d",
+                counters["analyzed"],
+                counters["missing_title"],
+                counters["missing_link"],
+                counters["missing_price"],
+                counters["extraction_errors"],
+                counters["accepted"],
+            )
             print(f"{self.name}: {len(resultados)} produtos encontrados.")
 
             return resultados
