@@ -1,4 +1,5 @@
 import argparse
+import getpass
 import json
 from pathlib import Path
 import sys
@@ -8,6 +9,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.single_cycle_runner import SingleCycleConfig, SingleCycleRunner
+
+
+def prompt_amazon_tag():
+    try:
+        return getpass.getpass("Amazon Associate Tag: ")
+    except (EOFError, KeyboardInterrupt) as error:
+        raise ValueError(
+            "Leitura da Amazon Associate Tag cancelada."
+        ) from error
 
 
 def parser():
@@ -23,6 +33,11 @@ def parser():
     modes = result.add_mutually_exclusive_group()
     modes.add_argument("--dry-run", action="store_true")
     modes.add_argument("--real-send", action="store_true")
+    result.add_argument(
+        "--prompt-amazon-tag",
+        action="store_true",
+        help="Solicita a Amazon Associate Tag de forma silenciosa.",
+    )
     return result
 
 
@@ -39,9 +54,16 @@ def main(argv=None):
             database_path=args.database,
             real_send=args.real_send,
         )
+        amazon_associate_tag = (
+            prompt_amazon_tag()
+            if args.prompt_amazon_tag else None
+        )
+        cycle = SingleCycleRunner(
+            config,
+            amazon_associate_tag=amazon_associate_tag,
+        )
     except ValueError as error:
         argument_parser.error(str(error))
-    cycle = SingleCycleRunner(config)
     result = cycle.run()
     print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
     return result

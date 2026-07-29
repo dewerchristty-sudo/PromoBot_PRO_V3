@@ -305,7 +305,7 @@ class SingleCycleRunnerTest(unittest.TestCase):
             "transport_calls", "delivery_status", "attempt_status",
             "final_result", "shadow_pipeline_enabled",
             "shadow_database_touched", "temporary_database_used",
-            "duration_seconds",
+            "affiliate_block_reasons", "duration_seconds",
         }
         self.assertEqual(set(result.as_dict()), required)
 

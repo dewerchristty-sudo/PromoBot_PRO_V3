@@ -8,6 +8,11 @@ from typing import Callable
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from src.affiliates.amazon import (
+    AmazonAffiliateProvider,
+    validate_associate_tag,
+)
+from src.affiliates.config import StoreAffiliateConfig
 from src.core.delivery_models import DeliveryStatus
 from src.core.delivery_service import DeliveryService
 from src.core.notifier import Notifier
@@ -132,6 +137,7 @@ class SingleCycleResult:
     shadow_pipeline_enabled: bool
     shadow_database_touched: bool
     temporary_database_used: bool
+    affiliate_block_reasons: tuple[str, ...]
     duration_seconds: float
 
     def as_dict(self):
@@ -164,6 +170,7 @@ class SingleCycleRunner:
         database=None,
         notifier=None,
         clock=None,
+        amazon_associate_tag=None,
     ):
         if not isinstance(config, SingleCycleConfig):
             raise TypeError("config deve ser SingleCycleConfig.")
@@ -173,6 +180,10 @@ class SingleCycleRunner:
         self.database = database
         self.notifier = notifier
         self.clock = clock or time.monotonic
+        self._amazon_associate_tag = (
+            validate_associate_tag(amazon_associate_tag)
+            if amazon_associate_tag is not None else ""
+        )
 
     def collect_store(self, term, store_name):
         messages = []
@@ -259,6 +270,7 @@ class SingleCycleRunner:
                 started,
             )
         finally:
+            self._amazon_associate_tag = ""
             if owned_database:
                 database.fechar()
             if temporary is not None:
@@ -288,8 +300,29 @@ class SingleCycleRunner:
                     continue
                 product["_single_cycle_execution_id"] = execution_id
                 product["preco_valor"] = self.price(product)
+                self.enrich_amazon_affiliate(product)
                 products.append(product)
         return products, tuple(errors)
+
+    def enrich_amazon_affiliate(self, product):
+        if str(product.get("loja") or "").strip() != "Amazon":
+            return product
+        original = str(product.get("link") or "").strip()
+        product["link_original"] = original
+        if not self._amazon_associate_tag:
+            product["_affiliate_error"] = "associate_tag_nao_configurada"
+            return product
+        provider = AmazonAffiliateProvider(StoreAffiliateConfig(
+            associate_tag=self._amazon_associate_tag
+        ))
+        affiliate_url, source, error = provider.generate(original)
+        if error or not provider.validate(affiliate_url, original):
+            product["_affiliate_error"] = error or "link_gerado_invalido"
+            return product
+        product["link_afiliado_salvo"] = affiliate_url
+        product["_affiliate_source"] = source
+        product["_affiliate_error"] = ""
+        return product
 
     def eligible_products(
         self,
@@ -503,6 +536,11 @@ class SingleCycleRunner:
             temporary_database_used=(
                 self.config.mode == SingleCycleMode.DRY_RUN
             ),
+            affiliate_block_reasons=tuple(sorted({
+                str(product.get("_affiliate_error") or "").strip()
+                for product in products
+                if product.get("_affiliate_error")
+            })),
             duration_seconds=round(max(self.clock() - started, 0), 3),
         )
 
