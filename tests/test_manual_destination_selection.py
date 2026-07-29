@@ -267,6 +267,9 @@ class ManualDestinationSelectionTest(unittest.TestCase):
         page = self.page()
         page.manual_title = FakeVariable("Produto preenchido")
         page.manual_category = FakeVariable("Casa e Enxoval")
+        page.manual_details = Mock()
+        page.manual_fallback_required = True
+        page.shopee_manual_link = "https://example.com/produto"
         page.select_manual_destination("house")
 
         self.assertFalse(page.show_manual_destination_result(
@@ -276,16 +279,23 @@ class ManualDestinationSelectionTest(unittest.TestCase):
         self.assertEqual(page.manual_title.get(), "Produto preenchido")
         self.assertEqual(page.manual_category.get(), "Casa e Enxoval")
         self.assertEqual(page.selected_destination.get(), "house")
+        self.assertTrue(page.manual_fallback_required)
+        page.manual_details.grid_remove.assert_not_called()
 
     @patch("src.ui.affiliate_links_page.messagebox")
     def test_limpa_selecao_somente_apos_sucesso(self, messagebox):
         page = self.page()
+        page.manual_details = Mock()
+        page.manual_fallback_required = True
+        page.shopee_manual_link = "https://example.com/produto"
         page.select_manual_destination("house")
 
         self.assertTrue(page.show_manual_destination_result(
             "Enviado por: WhatsApp — Casa & Ofertas."
         ))
         self.assertEqual(page.selected_destination.get(), "")
+        self.assertFalse(page.manual_fallback_required)
+        page.manual_details.grid_remove.assert_called_once()
 
         page.select_manual_destination("review")
         self.assertFalse(page.show_manual_destination_result("Falha"))

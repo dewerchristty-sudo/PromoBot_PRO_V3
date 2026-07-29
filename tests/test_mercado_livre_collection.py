@@ -192,6 +192,49 @@ class MercadoLivreCollectionTest(unittest.TestCase):
                 page.close.assert_called_once()
                 manager.close.assert_called_once()
 
+    def test_product_from_url_retorna_produto_antes_de_fechar_recursos(self):
+        page = Mock()
+        page.goto.return_value.status = 200
+        page.url = "https://produto.mercadolivre.com.br/MLB-123456"
+        page.content.return_value = "<html>produto</html>"
+        page.title.return_value = "Produto"
+        manager = Mock()
+        manager.new_page.return_value = page
+        store = MercadoLivre(manager)
+        expected = {
+            "loja": "Mercado Livre",
+            "titulo": "Produto",
+            "preco": "99,90",
+        }
+
+        with patch.object(
+            store,
+            "product_data_from_html",
+            return_value=expected,
+        ):
+            result = store.product_from_url(page.url)
+
+        self.assertEqual(result, expected)
+        page.close.assert_called_once()
+        manager.close.assert_called_once()
+
+    def test_product_from_url_preserva_erro_original_e_fecha_recursos(self):
+        page = Mock()
+        page.goto.side_effect = ValueError("anuncio indisponivel")
+        page.close.side_effect = RuntimeError("pagina ja fechada")
+        manager = Mock()
+        manager.new_page.return_value = page
+        manager.close.side_effect = RuntimeError("contexto ja fechado")
+        store = MercadoLivre(manager)
+
+        with self.assertRaisesRegex(ValueError, "anuncio indisponivel"):
+            store.product_from_url(
+                "https://produto.mercadolivre.com.br/MLB-123456"
+            )
+
+        page.close.assert_called_once()
+        manager.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

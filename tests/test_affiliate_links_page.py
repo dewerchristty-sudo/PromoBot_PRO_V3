@@ -5,6 +5,23 @@ from src.core.notifier import Notifier
 from src.ui.affiliate_links_page import AffiliateLinksPage
 
 
+class StateEntry:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def delete(self, _start, _end):
+        self.value = ""
+
+    def insert(self, _index, value):
+        self.value = value
+
+    def focus_set(self):
+        return None
+
+
 class AffiliateLinksPageTest(unittest.TestCase):
 
     def page(self):
@@ -81,6 +98,104 @@ class AffiliateLinksPageTest(unittest.TestCase):
         page.manual_details.grid.assert_called_once()
         page.manual_title.focus_set.assert_called_once()
 
+    def manual_state_page(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.manual_only = False
+        page.manual_title = StateEntry("Produto anterior")
+        page.manual_price = StateEntry("99,90")
+        page.manual_old_price = StateEntry("149,90")
+        page.manual_image = StateEntry("https://example.com/anterior.jpg")
+        page.manual_details = Mock()
+        page.status = Mock()
+        page.update_idletasks = Mock()
+        page.original_link = StateEntry("https://example.com/produto-novo")
+        page.shopee_manual_link = "https://example.com/produto-anterior"
+        page.manual_fallback_store = "Mercado Livre"
+        page.manual_fallback_required = True
+        page.selected_destination = type(
+            "Destination",
+            (),
+            {
+                "get": lambda self: "review",
+                "set": lambda self, value: setattr(self, "value", value),
+            },
+        )()
+        return page
+
+    def test_falha_importacao_abre_campos_manuais(self):
+        page = self.manual_state_page()
+        page.activate_manual_fallback(
+            "https://example.com/produto-novo",
+            "Mercado Livre",
+            "Preencha os dados ausentes.",
+        )
+        self.assertTrue(page.manual_fallback_required)
+        self.assertEqual(page.shopee_manual_link, "https://example.com/produto-novo")
+        page.manual_details.grid.assert_called_once()
+
+    def test_nova_pesquisa_fecha_campos_e_remove_valores_anteriores(self):
+        page = self.manual_state_page()
+        page.on_original_link_changed()
+        self.assertFalse(page.manual_fallback_required)
+        self.assertEqual(page.manual_title.get(), "")
+        self.assertEqual(page.manual_price.get(), "")
+        self.assertEqual(page.manual_image.get(), "")
+        page.manual_details.grid_remove.assert_called_once()
+
+    def test_importacao_automatica_mantem_campos_manuais_ocultos(self):
+        page = self.manual_state_page()
+        page.reset_manual_fallback()
+        self.assertFalse(page.manual_fallback_required)
+        page.manual_details.grid_remove.assert_called_once()
+
+    def test_nova_falha_reabre_campos_sem_vazar_valores(self):
+        page = self.manual_state_page()
+        page.on_original_link_changed()
+        page.activate_manual_fallback(
+            page.original_link.get(),
+            "Mercado Livre",
+            "Dados ausentes.",
+        )
+        self.assertEqual(page.manual_title.get(), "")
+        self.assertEqual(page.manual_price.get(), "")
+        self.assertTrue(page.manual_fallback_required)
+        self.assertEqual(page.manual_details.grid.call_count, 1)
+
+    def test_limpeza_visual_nao_altera_destino(self):
+        page = self.manual_state_page()
+        page.reset_manual_fallback()
+        self.assertEqual(page.selected_destination.get(), "review")
+
+    def test_troca_de_modo_redefine_layout_manual(self):
+        page = self.manual_state_page()
+        page.update_manual_category_visibility = Mock()
+        page.product_label = Mock()
+        page.product_menu = Mock()
+        page.save_button = Mock()
+        page.notify_button = Mock()
+        page.ignore_button = Mock()
+        page.show_selected = Mock()
+
+        page.change_entry_mode("Oferta pendente")
+
+        self.assertFalse(page.manual_fallback_required)
+        page.manual_details.grid_remove.assert_called_once()
+        page.update_manual_category_visibility.assert_called_once_with(False)
+        page.show_selected.assert_called_once()
+        self.assertEqual(page.selected_destination.get(), "review")
+
+    def test_anuncio_inexistente_nao_reaproveita_dados_anteriores(self):
+        page = self.manual_state_page()
+        page.on_original_link_changed()
+        page.activate_manual_fallback(
+            "https://produto.mercadolivre.com.br/MLB-48954912",
+            "Mercado Livre",
+            "Anuncio indisponivel.",
+        )
+        self.assertEqual(page.manual_title.get(), "")
+        self.assertEqual(page.manual_old_price.get(), "")
+        self.assertEqual(page.manual_fallback_store, "Mercado Livre")
+
     def test_aceita_link_curto_oficial_link_amazon(self):
 
         page = AffiliateLinksPage.__new__(AffiliateLinksPage)
@@ -149,12 +264,27 @@ class AffiliateLinksPageTest(unittest.TestCase):
             },
         )()
 
+        original = (
+            "https://www.mercadolivre.com.br/navigation/recos"
+            "?item_id=abc&wid=MLB4580504787&sid=recos"
+        )
+        self.assertEqual(page.normalize_manual_product_link(original), original)
+
+    def test_preserva_url_de_catalogo_mercado_livre(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.database = Mock()
+        original = (
+            "https://www.mercadolivre.com.br/smart-tv/p/MLB48954912"
+            "?pdp_filters=item_id%3AMLB6760718206"
+        )
+        self.assertEqual(page.normalize_manual_product_link(original), original)
+
+    def test_preserva_link_social_mercado_livre(self):
+        page = AffiliateLinksPage.__new__(AffiliateLinksPage)
+        page.database = Mock()
         self.assertEqual(
-            page.normalize_manual_product_link(
-                "https://www.mercadolivre.com.br/navigation/recos"
-                "?item_id=abc&wid=MLB4580504787&sid=recos"
-            ),
-            "https://produto.mercadolivre.com.br/MLB-4580504787",
+            page.normalize_manual_product_link("https://meli.la/12MQRBY"),
+            "https://meli.la/12MQRBY",
         )
 
     def test_rejeita_carrinho_amazon_como_link_original(self):

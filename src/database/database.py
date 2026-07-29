@@ -251,6 +251,30 @@ class Database:
             """)
 
             self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mercado_livre_identidades(
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                link_original TEXT NOT NULL UNIQUE,
+
+                link_afiliado TEXT DEFAULT '',
+
+                link_final TEXT DEFAULT '',
+
+                tipo TEXT NOT NULL DEFAULT 'DESCONHECIDO',
+
+                id_item TEXT DEFAULT '',
+
+                id_catalogo TEXT DEFAULT '',
+
+                fonte_da_identidade TEXT DEFAULT '',
+
+                data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+            )
+            """)
+
+            self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS ofertas_ignoradas(
 
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -829,6 +853,55 @@ class Database:
 
             return resultado["link_afiliado"] if resultado else ""
 
+    def salvar_identidade_mercado_livre(
+        self,
+        link_original,
+        link_afiliado,
+        identidade,
+    ):
+        """Persiste a resolução sem substituir a URL original do usuário."""
+
+        payload = dict(identidade or {})
+        original = str(link_original or "").strip()
+        if not original:
+            raise ValueError("A identidade do Mercado Livre exige URL original.")
+        values = (
+            original,
+            str(link_afiliado or "").strip(),
+            str(payload.get("url_final") or "").strip(),
+            str(payload.get("tipo") or "DESCONHECIDO").strip(),
+            str(payload.get("id_item") or "").strip(),
+            str(payload.get("id_catalogo") or "").strip(),
+            str(payload.get("fonte_da_identidade") or "").strip(),
+        )
+        with self.lock:
+            self.cursor.execute("""
+            INSERT INTO mercado_livre_identidades(
+                link_original, link_afiliado, link_final, tipo,
+                id_item, id_catalogo, fonte_da_identidade
+            )
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(link_original) DO UPDATE SET
+                link_afiliado = excluded.link_afiliado,
+                link_final = excluded.link_final,
+                tipo = excluded.tipo,
+                id_item = excluded.id_item,
+                id_catalogo = excluded.id_catalogo,
+                fonte_da_identidade = excluded.fonte_da_identidade,
+                data = CURRENT_TIMESTAMP
+            """, values)
+            self.conn.commit()
+
+    def buscar_identidade_mercado_livre(self, link_original):
+        with self.lock:
+            self.cursor.execute("""
+            SELECT * FROM mercado_livre_identidades
+            WHERE link_original = ?
+            LIMIT 1
+            """, (str(link_original or "").strip(),))
+            result = self.cursor.fetchone()
+            return dict(result) if result else None
+
     # ============================================
 
     def ignorar_oferta(self, produto):
@@ -1005,6 +1078,15 @@ class Database:
             return f"{shopee.group(1)}.{shopee.group(2)}"
 
         return ""
+
+    @staticmethod
+    def identidade_mercado_livre_link(link):
+        """Mantém IDs de item e catálogo separados, sem inferência destrutiva."""
+
+        from src.stores.mercado_livre import MercadoLivre
+
+        identity = MercadoLivre.identity_from_url(link)
+        return MercadoLivre.identity_payload(identity)
 
     # ============================================
 

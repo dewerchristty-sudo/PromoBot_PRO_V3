@@ -134,6 +134,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
         self.manual_only = bool(manual_only)
         self.shopee_manual_link = ""
         self.manual_fallback_store = ""
+        self.manual_fallback_required = False
         self.load_generation = 0
         self.loading_pending = False
         self.entry_mode = (
@@ -225,6 +226,11 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
         self.original_link = ctk.CTkEntry(original_row)
         self.original_link.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.original_link.bind("<KeyRelease>", self.on_original_link_changed)
+        self.original_link.bind(
+            "<<Paste>>",
+            lambda _event: self.after(0, self.on_original_link_changed),
+        )
 
         ctk.CTkButton(
             original_row,
@@ -448,6 +454,51 @@ class AffiliateLinksPage(ctk.CTkFrame):
         if hasattr(self, "review_destination_button"):
             self.update_destination_buttons()
 
+    @staticmethod
+    def clear_entry_value(entry):
+        if entry is not None:
+            entry.delete(0, "end")
+
+    def reset_manual_fallback(self):
+        for field_name in (
+            "manual_title",
+            "manual_price",
+            "manual_old_price",
+            "manual_image",
+        ):
+            self.clear_entry_value(getattr(self, field_name, None))
+        self.shopee_manual_link = ""
+        self.manual_fallback_store = ""
+        self.manual_fallback_required = False
+        manual_details = getattr(self, "manual_details", None)
+        if manual_details is not None and not getattr(self, "manual_only", False):
+            manual_details.grid_remove()
+
+    def on_original_link_changed(self, _event=None):
+        fallback_link = str(getattr(self, "shopee_manual_link", "") or "")
+        if not fallback_link:
+            return
+        original_link = getattr(self, "original_link", None)
+        if original_link is not None and original_link.get().strip() != fallback_link:
+            self.reset_manual_fallback()
+
+    def activate_manual_fallback(self, link, store, status_text):
+        if str(link or "") != str(getattr(self, "shopee_manual_link", "") or ""):
+            self.reset_manual_fallback()
+        self.shopee_manual_link = str(link or "")
+        self.manual_fallback_store = str(store or "")
+        self.manual_fallback_required = True
+        self.manual_details.grid(
+            row=6,
+            column=0,
+            sticky="ew",
+            padx=18,
+            pady=(0, 14),
+        )
+        self.manual_title.focus_set()
+        self.status.configure(text=status_text)
+        self.update_idletasks()
+
     def update_destination_buttons(self):
 
         selected = self.selected_destination.get()
@@ -574,29 +625,18 @@ class AffiliateLinksPage(ctk.CTkFrame):
         )
 
     def activate_shopee_manual_fallback(self, link):
-        self.clear_manual_destination()
-        self.shopee_manual_link = link
-        self.manual_fallback_store = "Shopee"
-        self.manual_details.grid(
-            row=6,
-            column=0,
-            sticky="ew",
-            padx=18,
-            pady=(0, 14),
+        self.activate_manual_fallback(
+            link,
+            "Shopee",
+            "Selecao de variacao cancelada. Preencha os dados manualmente "
+            "e clique novamente em Salvar e notificar agora.",
         )
-        self.manual_title.focus_set()
-        self.status.configure(
-            text=(
-                "Seleção de variação cancelada. Preencha os dados "
-                "manualmente e clique novamente em Salvar e notificar agora."
-            )
-        )
-        self.update_idletasks()
 
     def load_pending(self):
 
         if self.manual_only:
             return
+        self.reset_manual_fallback()
         self.load_generation += 1
         generation = self.load_generation
         only_offers = bool(self.only_offers.get())
@@ -766,12 +806,22 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
         original_link = str(link or "").strip()
         store = self.identify_store_by_link(original_link)
-        reference = self.database.referencia_produto_link(original_link)
         clean_link = Parser.remove_tracking(original_link).rstrip("/")
 
         if not store:
             return clean_link
 
+        if store == "mercado livre":
+            identity = MercadoLivre.identity_from_url(original_link)
+            if identity.tipo.value == "DESCONHECIDO":
+                raise ValueError(
+                    "LINK_INCOMPLETO: o link do Mercado Livre não identifica "
+                    "um anúncio, catálogo ou página social."
+                )
+            # A URL integral preserva item_id, wid e a identidade de catálogo.
+            return original_link.rstrip("/")
+
+        reference = self.database.referencia_produto_link(original_link)
         if not reference:
             raise ValueError(
                 "O link original precisa abrir diretamente a pagina do produto. "
@@ -781,14 +831,11 @@ class AffiliateLinksPage(ctk.CTkFrame):
         if store == "amazon":
             return f"https://www.amazon.com.br/dp/{reference}"
 
-        if store == "mercado livre":
-            number = reference.removeprefix("MLB")
-            return f"https://produto.mercadolivre.com.br/MLB-{number}"
-
         return clean_link
 
     def change_entry_mode(self, mode):
 
+        self.reset_manual_fallback()
         self.entry_mode = mode
         manual = mode == "Cadastro manual"
         self.update_manual_category_visibility(manual)
@@ -862,7 +909,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
     def show_selected(self):
 
-        self.clear_manual_destination()
+        self.reset_manual_fallback()
         self.original_link.delete(0, "end")
 
         product = self.selected_product() if self.entry_mode != "Cadastro manual" else None
@@ -963,6 +1010,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
 
     def save_and_notify(self):
 
+        self.on_original_link_changed()
         entry_mode = getattr(self, "entry_mode", "")
         missing_category = False
         if entry_mode == "Oferta pendente":
@@ -1008,6 +1056,14 @@ class AffiliateLinksPage(ctk.CTkFrame):
             try:
                 recovered = self.ensure_mercado_livre_product_record(product)
             except (ValueError, RuntimeError) as error:
+                if entry_mode == "Cadastro manual":
+                    self.activate_manual_fallback(
+                        product["link"],
+                        "Mercado Livre",
+                        "O anuncio do Mercado Livre nao esta disponivel para "
+                        "recuperacao automatica. Se ainda possuir dados validos, "
+                        "preencha-os manualmente.",
+                    )
                 messagebox.showerror(
                     "Produto não encontrado",
                     "Não foi possível recuperar ou criar automaticamente o "
@@ -1198,6 +1254,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
                             except Exception as affiliate_error:
                                 if (
                                     import_error is None
+                                    or store_key == "mercado livre"
                                     or any(
                                         marker
                                         in str(affiliate_error).casefold()
@@ -1239,6 +1296,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
                             raise ValueError(str(import_error))
                         if shopee_blocked or mercado_livre_blocked:
                             self.shopee_manual_link = product["link"]
+                            self.manual_fallback_required = True
                             self.manual_fallback_store = (
                                 "Mercado Livre"
                                 if mercado_livre_blocked
@@ -1252,15 +1310,27 @@ class AffiliateLinksPage(ctk.CTkFrame):
                                 pady=(0, 14),
                             )
                             self.manual_title.focus_set()
-                            self.status.configure(
-                                text=(
-                                    f"O {self.manual_fallback_store} bloqueou "
-                                    "a coleta automatica. "
+                            technical_cause = str(import_error or "").strip()
+                            if mercado_livre_blocked:
+                                status_text = (
+                                    "O Mercado Livre não permitiu recuperar o "
+                                    "produto automaticamente. Preencha os dados "
+                                    "abaixo ou corrija o link."
+                                )
+                            else:
+                                status_text = (
+                                    "A Shopee bloqueou a coleta automatica. "
                                     "Preencha os dados abaixo e clique novamente "
                                     "em Salvar e notificar agora."
                                 )
-                            )
+                            self.status.configure(text=status_text)
                             self.update_idletasks()
+                            if mercado_livre_blocked:
+                                raise ValueError(
+                                    f"{technical_cause or 'FALHA_TECNICA: não foi possível recuperar o produto.'}\n\n"
+                                    "Os campos manuais foram abertos e os links "
+                                    "informados foram preservados."
+                                )
                             raise ValueError(
                                 f"O {self.manual_fallback_store} bloqueou a "
                                 "coleta automatica deste produto.\n\n"
@@ -1281,10 +1351,26 @@ class AffiliateLinksPage(ctk.CTkFrame):
                             "Verifique o link e tente novamente."
                         )
 
+                    ml_identity = (
+                        dict(imported.get("ml_identity") or {})
+                        if store_key == "mercado livre"
+                        else {}
+                    )
                     # Usa sempre a URL canonica informada pelo usuario para que
                     # produto e vinculo afiliado tenham exatamente a mesma chave.
                     imported["link"] = product["link"]
                     self.database.salvar_produto(imported)
+                    save_identity = getattr(
+                        self.database,
+                        "salvar_identidade_mercado_livre",
+                        None,
+                    )
+                    if ml_identity and callable(save_identity):
+                        save_identity(
+                            product["link"],
+                            self.affiliate_link.get().strip(),
+                            ml_identity,
+                        )
                     saved_product = self.database.buscar_produto_por_link(
                         product["link"]
                     )
@@ -1668,6 +1754,7 @@ class AffiliateLinksPage(ctk.CTkFrame):
         if str(result or "").startswith("Enviado por:"):
             messagebox.showinfo("Notificação", result)
             self.clear_manual_destination()
+            self.reset_manual_fallback()
             return True
         if str(result or "").startswith("Cancelado:"):
             messagebox.showinfo("Envio cancelado", result)

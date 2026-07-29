@@ -1,6 +1,11 @@
+import logging
+
 from src.scraper import Locator
 from src.scraper import Parser
 from src.scraper import Waits
+
+
+logger = logging.getLogger(__name__)
 
 
 class StoreScraper:
@@ -44,9 +49,26 @@ class StoreScraper:
 
     # ==========================================
 
-    def close(self, page):
+    def close(self, page=None):
 
-        page.close()
+        if page is not None:
+            try:
+                page.close()
+            except Exception as error:
+                logger.warning(
+                    "Falha nao bloqueante ao fechar pagina do scraper: %s",
+                    error,
+                )
+
+        closer = getattr(self.browser_manager, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as error:
+                logger.warning(
+                    "Falha nao bloqueante ao fechar navegador do scraper: %s",
+                    error,
+                )
 
     # ==========================================
 
