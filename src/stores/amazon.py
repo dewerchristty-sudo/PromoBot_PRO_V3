@@ -22,6 +22,28 @@ class AmazonPreviousPrice:
 
 class Amazon(BaseStore):
 
+    CURRENT_PRICE_SELECTORS = (
+        "#corePrice_feature_div .priceToPay .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen",
+        "#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div "
+        ".a-price:not(.a-text-price) .a-offscreen",
+        "#price_inside_buybox",
+        "#newBuyBoxPrice",
+        ".a-price:not(.a-text-price) .a-offscreen",
+    )
+    NON_FINAL_PRICE_MARKERS = (
+        "parcela",
+        "x de r$",
+        "por mês",
+        "/mês",
+        "frete",
+        "assinatura",
+        "assine e economize",
+        "subscribe",
+        "preço prime",
+    )
+
     @staticmethod
     def normalize_price(raw_value):
         """Normaliza valores Amazon para o formato brasileiro 12,34."""
@@ -49,6 +71,35 @@ class Amazon(BaseStore):
             return float(text)
         except ValueError:
             return 0.0
+
+    @classmethod
+    def current_price_from_soup(cls, soup):
+        """Seleciona o valor final à vista e rejeita preços auxiliares."""
+
+        for selector in cls.CURRENT_PRICE_SELECTORS:
+            for element in soup.select(selector):
+                contexts = [element]
+                parent = element.parent
+                for _ in range(3):
+                    if not parent or parent.name in {"body", "html"}:
+                        break
+                    contexts.append(parent)
+                    parent = parent.parent
+                context = " ".join(
+                    node.get_text(" ", strip=True)
+                    for node in contexts
+                ).casefold()
+                if any(marker in context for marker in cls.NON_FINAL_PRICE_MARKERS):
+                    continue
+                raw = (
+                    element.get("aria-label")
+                    or element.get("content")
+                    or element.get_text(" ", strip=True)
+                )
+                normalized = cls.normalize_price(raw)
+                if cls.price_number(normalized) > 0:
+                    return normalized
+        return ""
 
     @classmethod
     def explicit_previous_price_candidates(cls, soup):
@@ -311,23 +362,10 @@ class Amazon(BaseStore):
         soup = BeautifulSoup(html, "lxml")
 
         title = soup.select_one("#productTitle")
-        price = (
-            soup.select_one(
-                "#corePrice_feature_div "
-                ".a-price:not(.a-text-price) .a-offscreen"
-            )
-            or soup.select_one(
-                "#corePriceDisplay_desktop_feature_div "
-                ".a-price:not(.a-text-price) .a-offscreen"
-            )
-            or soup.select_one(
-                ".a-price:not(.a-text-price) .a-offscreen"
-            )
-        )
         image = soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
 
         title_text = title.get_text(" ", strip=True) if title else ""
-        price_text = price.get_text(strip=True) if price else ""
+        price_text = self.current_price_from_soup(soup)
         image_url = ""
         if image:
             image_url = image.get("data-old-hires") or image.get("src") or ""
