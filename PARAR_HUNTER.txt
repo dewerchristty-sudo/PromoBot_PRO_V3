@@ -1,0 +1,20 @@
+============================================================
+  COMO PARAR O HUNTER AUTOMATICO
+============================================================
+
+1. Clique no terminal onde o Hunter está rodando.
+2. Pressione Ctrl+C uma vez.
+3. Aguarde a mensagem de encerramento.
+4. Confirme que apareceu:
+   "Scheduler encerrado. Nenhum processo ativo."
+
+NAO feche o terminal à força (botao X), exceto em
+travamento confirmado.
+
+OBSERVAÇÕES:
+
+- O lock do scheduler será liberado automaticamente.
+- A fila de entrega permanece preservada.
+- Live delivery estará desativado por padrao.
+- Para verificar a fila: python _check_fila.py
+- Para novo ciclo: executar INICIAR_HUNTER_AUTOMATICO.bat
