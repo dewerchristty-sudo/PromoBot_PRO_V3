@@ -81,7 +81,9 @@ class MercadoLivre(BaseStore):
         "a.poly-component__title[href]",
         "a.ui-search-link[href]",
         "a[href*='produto.mercadolivre.com.br/MLB-']",
+        "a[href*='produto.mercadolivre.com.br/MLBU-']",
         "a[href*='mercadolivre.com.br/p/MLB']",
+        "a[href*='mercadolivre.com.br/p/MLBU']",
         "a[href*='/up/MLBU']",
     )
     block_markers = (
@@ -443,26 +445,33 @@ class MercadoLivre(BaseStore):
             )
 
         filters = " ".join(query.get("pdp_filters", ()))
-        item_match = re.search(r"item_id[:%]3?A?(MLB\d+)", filters, re.I)
+        item_match = re.search(r"item_id[:%]3?A?(MLBU?\d+)", filters, re.I)
         if not item_match:
-            item_match = re.search(r"item_id:?(MLB\d+)", filters, re.I)
+            item_match = re.search(r"item_id:?(MLBU?\d+)", filters, re.I)
         wid = next(
             (
-                str(candidate).upper()
+                cls.normalize_product_id(candidate)
                 for candidate in query.get("wid", ())
-                if re.fullmatch(r"MLB\d+", str(candidate), re.I)
+                if cls.normalize_product_id(str(candidate))
             ),
             "",
         )
         id_item = (
-            item_match.group(1).upper() if item_match else wid
+            cls.normalize_product_id(item_match.group(1))
+            if item_match else wid
         )
 
-        direct = re.search(r"/MLB-(\d+)(?:[-/?#]|$)", path, re.I)
-        if direct and not id_item:
-            id_item = f"MLB{direct.group(1)}"
+        path_lower = path.casefold()
+        if "/up/" not in path_lower and "/p/" not in path_lower:
+            direct = re.search(
+                r"/(MLBU?-?\d+)(?:[-/?#]|$)", path, re.I
+            )
+            if direct and not id_item:
+                id_item = cls.normalize_product_id(direct.group(1))
 
-        catalog = re.search(r"/p/(MLB\d+)(?:[/?#]|$)", path, re.I)
+        catalog = re.search(
+            r"/p/(MLBU?\d+)(?:[/?#]|$)", path, re.I
+        )
         catalog_up = re.search(r"/up/(MLBU\d+)(?:[/?#]|$)", path, re.I)
         id_catalogo = (
             catalog.group(1).upper() if catalog
@@ -770,6 +779,23 @@ class MercadoLivre(BaseStore):
         return nodes
 
     @staticmethod
+    def normalize_product_id(raw_id):
+        """Normaliza Product ID do Mercado Livre (MLB ou MLBU).
+
+        Preserva a diferenca entre MLB e MLBU.
+        Remove apenas o hifen.
+        Retorna em maiusculas.
+        Nunca converte MLBU em MLB.
+        Nunca retorna ID vazio para um ID valido.
+        """
+        if not raw_id:
+            return ""
+        cleaned = str(raw_id).strip().upper().replace("-", "")
+        if re.fullmatch(r"MLBU?\d+", cleaned):
+            return cleaned
+        return ""
+
+    @staticmethod
     def product_id_from_url(url):
         identity = MercadoLivre.identity_from_url(url)
         return identity.id_item
@@ -901,16 +927,24 @@ class MercadoLivre(BaseStore):
             if not produto_id:
                 produto_id = query.get("wid", [""])[0]
 
-            if produto_id.startswith("MLB"):
-                return f"https://produto.mercadolivre.com.br/{produto_id[:3]}-{produto_id[3:]}"
+            normalized_id = MercadoLivre.normalize_product_id(produto_id)
+            if normalized_id:
+                if normalized_id.startswith("MLBU"):
+                    prefix = "MLBU"
+                    suffix = normalized_id[4:]
+                else:
+                    prefix = "MLB"
+                    suffix = normalized_id[3:]
+                return f"https://produto.mercadolivre.com.br/{prefix}-{suffix}"
 
             direct_path = parsed.path.lower()
             is_direct_product = (
                 "/p/mlb" in direct_path
+                or "/p/mlbu" in direct_path
                 or "/up/mlbu" in direct_path
                 or (
                     "produto.mercadolivre.com.br" in parsed.netloc.lower()
-                    and "/mlb-" in direct_path
+                    and ("/mlb-" in direct_path or "/mlbu-" in direct_path)
                 )
             )
             if (

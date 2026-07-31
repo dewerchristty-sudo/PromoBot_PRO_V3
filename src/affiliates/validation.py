@@ -4,6 +4,7 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 from src.stores.active import normalize_store_name
+from src.stores.mercado_livre import MercadoLivre
 
 
 DEFAULT_PLACEHOLDERS = {
@@ -98,8 +99,10 @@ def product_identity(store, url):
         match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", value, re.I)
         return match.group(1).upper() if match else ""
     if key == "mercado livre":
-        match = re.search(r"\b(MLB)-?(\d+)\b", value, re.I)
-        return "".join(match.groups()).upper() if match else ""
+        match = re.search(r"\b(MLBU?-?\d+)\b", value, re.I)
+        return MercadoLivre.normalize_product_id(
+            match.group(1) if match else ""
+        )
     if key == "shopee":
         match = re.search(r"(?:-i\.|/product/)(\d+)[./](\d+)", value, re.I)
         return ".".join(match.groups()) if match else ""

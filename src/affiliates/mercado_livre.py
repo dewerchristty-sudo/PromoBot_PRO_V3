@@ -1,6 +1,8 @@
 import re
 from urllib.parse import quote
 
+from src.stores.mercado_livre import MercadoLivre
+
 from .base import AffiliateProvider
 
 
@@ -24,10 +26,10 @@ class MercadoLivreAffiliateProvider(AffiliateProvider):
                 else "integracao_oficial_nao_configurada"
             )
         match = re.search(
-            r"\b(MLB-?\d+)\b", original_url, re.IGNORECASE
+            r"\b(MLBU?-?\d+)\b", original_url, re.IGNORECASE
         )
-        product_id = (
-            match.group(1).replace("-", "").upper() if match else ""
+        product_id = MercadoLivre.normalize_product_id(
+            match.group(1) if match else ""
         )
         try:
             return self.config.template.format(
