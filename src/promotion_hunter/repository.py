@@ -21,7 +21,7 @@ class PromotionHunterRepository:
         self.migration_path = Path(migration_path) if migration_path else (
             Path(__file__).with_name("migrations") / "001_promotion_hunter.sql"
         )
-        self.conn = sqlite3.connect(self.database_path)
+        self.conn = sqlite3.connect(self.database_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
 

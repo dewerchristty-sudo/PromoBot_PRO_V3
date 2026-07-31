@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -230,13 +231,13 @@ def main(argv=None):
     try:
         if args.schedule:
             scheduler = PromotionHunterScheduler(
-                runner, sources, repository, args.interval, mode
+                runner, sources, repository, interval=args.interval, mode=mode
             )
             scheduler.start()
             print("scheduler iniciado; Ctrl+C para parar")
             try:
                 while scheduler.running:
-                    scheduler.timer.join(1)
+                    time.sleep(1)
             except KeyboardInterrupt:
                 scheduler.stop()
             return 0
