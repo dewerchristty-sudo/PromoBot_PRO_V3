@@ -57,6 +57,7 @@ class PromotionHunterDeliveryAdapter:
             "loja": queue_item["store"],
             "titulo": queue_item["title"],
             "preco": queue_item["current_price"],
+            "preco_valor": queue_item["current_price"],
             "preco_antigo": queue_item["previous_price"],
             "imagem": queue_item["image_url"],
             "link": queue_item["product_url"],

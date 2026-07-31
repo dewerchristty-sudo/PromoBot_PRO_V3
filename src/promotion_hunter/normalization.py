@@ -93,7 +93,7 @@ class ProductNormalizer:
                 product, "preco_atual", "current_price", "preco"
             )),
             previous_price=self._money_number(self._value(
-                product, "preco_anterior", "previous_price"
+                product, "preco_anterior", "preco_antigo", "previous_price"
             )),
             discount_percent=self._number(self._value(
                 product, "desconto_percentual", "discount_percent"

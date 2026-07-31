@@ -28,7 +28,12 @@ class PromotionHunterOfferPipelineAdapter:
         if "preco_antigo" in product:
             payload["raw_previous_price"] = product["preco_antigo"]
         payload["current_price"] = product.get("preco_atual")
-        payload["previous_price"] = product.get("preco_anterior")
+        previous_price = (
+            product.get("preco_anterior")
+            or product.get("previous_price")
+            or product.get("preco_antigo")
+        )
+        payload["previous_price"] = previous_price
         payload["savings"] = product.get("economia")
         payload["discount_percent"] = product.get("desconto_percentual")
         return payload

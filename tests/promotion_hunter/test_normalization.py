@@ -64,3 +64,51 @@ def test_absent_previous_price_remains_absent():
     assert product.current_price == 1040
     assert product.previous_price is None
     assert product.discount_percent is None
+
+
+def test_mercado_livre_preco_antigo_with_g_is_normalized():
+    """Mercado Livre retorna 'preco_antigo' (com G).
+    O normalizador deve reconhecer esse campo como preço anterior."""
+    source = PromotionSource("url", "product_url", "Mercado Livre", "URL")
+    product = ProductNormalizer().normalize({
+        "id": "MLBU3401120243",
+        "titulo": "Armario Madesa",
+        "preco": "699,99",
+        "preco_antigo": "858,81",
+    }, source)
+    assert product.current_price == 699.99
+    assert product.previous_price == 858.81
+    assert product.previous_price > product.current_price
+
+
+def test_preco_anterior_with_r_still_recognized():
+    """preco_anterior (com R) continua funcionando como antes."""
+    source = PromotionSource("kw", "keyword", "Mercado Livre", "Keyword")
+    product = ProductNormalizer().normalize({
+        "id": "MLB1", "titulo": "Produto", "preco": "100",
+        "preco_anterior": "150",
+    }, source)
+    assert product.current_price == 100
+    assert product.previous_price == 150
+
+
+def test_previous_price_english_still_recognized():
+    """previous_price (inglês) continua funcionando."""
+    source = PromotionSource("kw", "keyword", "Amazon", "Keyword")
+    product = ProductNormalizer().normalize({
+        "id": "B123", "titulo": "Produto", "preco": "50",
+        "previous_price": "80",
+    }, source)
+    assert product.current_price == 50
+    assert product.previous_price == 80
+
+
+def test_preco_anterior_overrides_preco_antigo_when_both_present():
+    """Quando ambos existem, preco_anterior (R) tem precedência."""
+    source = PromotionSource("url", "product_url", "Mercado Livre", "URL")
+    product = ProductNormalizer().normalize({
+        "id": "MLB1", "titulo": "Produto", "preco": "100",
+        "preco_anterior": "200",
+        "preco_antigo": "150",
+    }, source)
+    assert product.previous_price == 200

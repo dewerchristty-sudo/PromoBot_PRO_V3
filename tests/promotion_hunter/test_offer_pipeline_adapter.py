@@ -109,6 +109,110 @@ def test_inert_scheduler_never_selects_or_starts_background_work():
     assert decision.skipped_offers == ()
 
 
+def test_canonical_payload_uses_preco_antigo_when_preco_anterior_is_absent():
+    """Quando preco_anterior (R) está ausente mas preco_antigo (G) existe,
+    o payload canônico deve usar preco_antigo como previous_price."""
+    payload = PromotionHunterOfferPipelineAdapter._canonical_payload({
+        "titulo": "Armario Madesa",
+        "preco": "699,99",
+        "preco_atual": 699.99,
+        "preco_antigo": "858,81",
+    })
+    assert payload["previous_price"] == "858,81"
+    assert "raw_previous_price" in payload
+    assert payload["raw_previous_price"] == "858,81"
+
+
+def test_canonical_payload_preco_anterior_overrides_preco_antigo():
+    """preco_anterior (R) tem precedência sobre preco_antigo (G)."""
+    payload = PromotionHunterOfferPipelineAdapter._canonical_payload({
+        "titulo": "Produto",
+        "preco_atual": 100.0,
+        "preco_anterior": 200.0,
+        "preco_antigo": "150",
+    })
+    assert payload["previous_price"] == 200.0
+
+
+def test_canonical_payload_previous_price_not_overwritten_by_none():
+    """Um previous_price válido não pode ser sobrescrito por None."""
+    payload = PromotionHunterOfferPipelineAdapter._canonical_payload({
+        "titulo": "Produto",
+        "preco_atual": 100.0,
+        "preco_anterior": None,
+        "preco_antigo": "150",
+        "previous_price": 180.0,
+    })
+    assert payload["previous_price"] == 180.0
+
+
+def test_canonical_payload_previous_price_remains_none_when_all_absent():
+    """Sem nenhum preço anterior, previous_price deve permanecer None."""
+    payload = PromotionHunterOfferPipelineAdapter._canonical_payload({
+        "titulo": "Produto sem desconto",
+        "preco_atual": 50.0,
+    })
+    assert payload["previous_price"] is None
+
+
+def test_full_flow_maps_mercado_livre_preco_antigo_to_delivery_payload():
+    """Regressão: fluxo completo garante que preco_antigo do ML
+    chegue ao delivery_payload como previous_price."""
+    from src.promotion_hunter.decision_mapper import DecisionMapper
+    from src.promotion_hunter.normalization import ProductNormalizer
+    import json
+
+    # 1. Normalizar (simulando saida do ML)
+    source = PromotionSource("url-1", "product_url", "Mercado Livre", "URL")
+    product = ProductNormalizer().normalize({
+        "id": "MLBU3401120243",
+        "titulo": "Armario Madesa",
+        "preco": "699,99",
+        "preco_antigo": "858,81",
+        "link": "https://www.mercadolivre.com.br/.../MLBU3401120243",
+    }, source)
+
+    assert product.previous_price == 858.81
+    assert product.current_price == 699.99
+
+    # 2. Payload canônico
+    pipeline_payload = product.pipeline_payload()
+    canonical = PromotionHunterOfferPipelineAdapter._canonical_payload(
+        pipeline_payload
+    )
+    assert canonical["previous_price"] is not None
+
+    # 3. Simular OfferCandidate (usa OfferScore.number que aceita string ou float)
+    from src.offers.score import OfferScore
+    previous_num = OfferScore.number(canonical.get("previous_price"))
+    assert previous_num == 858.81
+
+    # 4. Mapear para delivery_payload
+    candidate = SimpleNamespace(
+        title=product.title, store=product.store,
+        current_price=product.current_price,
+        previous_price=previous_num,
+        image_url="", affiliate_link="https://meli.la/test",
+        product_link=product.url,
+    )
+    analysis = SimpleNamespace(
+        candidate=candidate,
+        score=SimpleNamespace(total=15, classification="fraca"),
+    )
+    item = SimpleNamespace(
+        run_id="test", analysis=analysis, error="",
+        diagnostic=SimpleNamespace(
+            score=15, classification="fraca", filter_approved=True,
+            duplicate=False, operational_blocks=(), queue_status="queued",
+            reason="oferta_aprovada",
+        ),
+    )
+    decision = DecisionMapper().map(product, item)
+    payload = decision.delivery_payload
+    assert payload["previous_price"] == 858.81
+    assert payload["current_price"] == 699.99
+
+
 def test_mapper_preserves_pipeline_affiliate_link_for_delivery():
     product = ProductNormalizer().normalize(
         {
