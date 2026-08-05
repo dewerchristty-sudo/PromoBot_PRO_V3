@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 # =====================================================================
@@ -41,6 +44,57 @@ MAX_MESSAGES_PER_HOUR: Final[int] = int(os.getenv(
 MAX_MESSAGES_PER_DAY: Final[int] = int(os.getenv(
     "PROMOTION_HUNTER_MAX_MESSAGES_PER_DAY", "8"
 ))
+
+ACCELERATED_MODE_KEY: Final[str] = "promotion_hunter_accelerated_mode"
+ACCELERATED_INTERVAL_MINUTES: Final[int] = 2
+ACCELERATED_MAX_MESSAGES_PER_RUN: Final[int] = 10
+ACCELERATED_MIN_SECONDS_BETWEEN_MESSAGES: Final[int] = 3
+
+
+@dataclass(frozen=True)
+class HunterOperationalSettings:
+    """Os três ajustes de ritmo; nenhuma regra de segurança é alterada."""
+
+    accelerated: bool = False
+    interval_minutes: int = INTERVAL_MINUTES
+    max_messages_per_run: int = MAX_MESSAGES_PER_RUN
+    min_seconds_between_messages: int = MIN_SECONDS_BETWEEN_MESSAGES
+
+
+def accelerated_mode_enabled(database_path=None):
+    """Lê a preferência existente sem criar banco, tabela ou schema."""
+    env = os.getenv("PROMOTION_HUNTER_ACCELERATED_MODE")
+    if env is not None:
+        return env.strip().casefold() in {"1", "true", "yes", "on"}
+    path = Path(database_path or ("promobot" + ".db"))
+    if not path.exists():
+        return False
+    try:
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as connection:
+            row = connection.execute(
+                "SELECT valor FROM configuracoes_app WHERE chave=? LIMIT 1",
+                (ACCELERATED_MODE_KEY,),
+            ).fetchone()
+    except (sqlite3.Error, OSError):
+        return False
+    return bool(row) and str(row[0]).strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def operational_settings(database_path=None):
+    enabled = accelerated_mode_enabled(database_path)
+    if enabled:
+        return HunterOperationalSettings(
+            accelerated=True,
+            interval_minutes=ACCELERATED_INTERVAL_MINUTES,
+            max_messages_per_run=ACCELERATED_MAX_MESSAGES_PER_RUN,
+            min_seconds_between_messages=(
+                ACCELERATED_MIN_SECONDS_BETWEEN_MESSAGES
+            ),
+        )
+    return HunterOperationalSettings()
 
 # =====================================================================
 # Cooldown e retry

@@ -7,6 +7,7 @@ from src.stores.active import normalize_store_name
 from .amazon import AmazonAffiliateProvider
 from .cache import AffiliateCache
 from .config import AffiliateConfig
+from .manual_links import ManualAffiliateLinkLookup
 from .mercado_livre import MercadoLivreAffiliateProvider
 from .models import AffiliateMetrics, AffiliateResult
 from .shopee import ShopeeAffiliateProvider
@@ -16,13 +17,20 @@ from .validation import validate_store_config
 class AffiliateManager:
     """Unico ponto de geracao e validacao usado pelo Pipeline."""
 
-    def __init__(self, config=None, cache=None, logger=None):
+    def __init__(
+        self,
+        config=None,
+        cache=None,
+        logger=None,
+        manual_lookup=None,
+    ):
         self.config = config or AffiliateConfig.from_environment()
         self.cache = cache or AffiliateCache(
             self.config.cache_path,
             self.config.cache_ttl_hours,
         )
         self.logger = logger or logging.getLogger("promobot.affiliates")
+        self.manual_lookup = manual_lookup or ManualAffiliateLinkLookup()
         self.providers = {
             "mercado livre": MercadoLivreAffiliateProvider(
                 self.config.mercado_livre
@@ -59,17 +67,6 @@ class AffiliateManager:
             "amazon": self.config.amazon,
             "shopee": self.config.shopee,
         }[store_key]
-        configuration = validate_store_config(
-            store, store_config, provider
-        )
-        if not configuration.generation_available:
-            return self.finish(AffiliateResult(
-                store=store,
-                original_url=original_url,
-                provider=provider.provider_name,
-                status=configuration.status,
-                error=configuration.reason,
-            ), started, "failures")
 
         if provided_url:
             if provider.validate(provided_url, original_url):
@@ -93,6 +90,26 @@ class AffiliateManager:
                 error="link_afiliado_fornecido_invalido",
             ), started, "invalid")
 
+        manual_url, manual_source = self.manual_lookup.resolve(
+            store, original_url
+        )
+        if manual_url and provider.validate(manual_url, original_url):
+            self.cache.put(
+                store,
+                original_url,
+                manual_url,
+                provider.provider_name,
+                manual_source,
+            )
+            return self.finish(AffiliateResult(
+                store=store,
+                original_url=original_url,
+                affiliate_url=manual_url,
+                provider=provider.provider_name,
+                status="GENERATED",
+                source=manual_source,
+            ), started, "generated")
+
         cached = self.cache.get(store, original_url)
         if cached and provider.validate(
             cached["affiliate_url"], original_url
@@ -106,6 +123,18 @@ class AffiliateManager:
                 source=cached["source"],
                 cache_hit=True,
             ), started, "cache_hits")
+
+        configuration = validate_store_config(
+            store, store_config, provider
+        )
+        if not configuration.generation_available:
+            return self.finish(AffiliateResult(
+                store=store,
+                original_url=original_url,
+                provider=provider.provider_name,
+                status=configuration.status,
+                error=configuration.reason,
+            ), started, "failures")
 
         url, source, error = provider.generate(original_url)
         if error:
@@ -193,3 +222,5 @@ class AffiliateManager:
 
     def close(self):
         self.cache.close()
+        if self.manual_lookup:
+            self.manual_lookup.close()

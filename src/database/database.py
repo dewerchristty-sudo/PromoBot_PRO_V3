@@ -24,10 +24,16 @@ class Database:
 
     def __init__(self, db_path=None):
 
+        from src.startup_diagnostics import startup_log
+        startup_log("06a Database.init iniciado")
+
         self.db = Path(db_path) if db_path else self.default_db_path()
+        startup_log("06b Database.path resolvido", str(self.db.resolve()))
+
 
         self.lock = threading.RLock()
 
+        startup_log("06c Database.sqlite3.connect")
         self.conn = sqlite3.connect(
             self.db,
             check_same_thread=False
@@ -37,10 +43,16 @@ class Database:
 
         self.cursor = self.conn.cursor()
 
+        startup_log("06d Database.criar_tabelas")
         self.criar_tabelas()
+
+        startup_log("06e Database.criar_backup_diario")
         self.criar_backup_diario()
 
+        startup_log("06f Database.init concluido")
+
     # ============================================
+
 
     def default_db_path(self):
 

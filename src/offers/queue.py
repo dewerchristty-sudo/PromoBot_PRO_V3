@@ -46,11 +46,24 @@ class OfferQueue:
     ) -> tuple[QueueOffer, bool]:
         now = self.now()
         current = OfferScore.number(ranked.candidate.current_price)
-        previous = OfferScore.number(
-            ranked.candidate.historical_reference_price
-            or ranked.candidate.previous_price
+        # Preço anterior explícito tem prioridade; histórico só vale se > preço atual
+        raw_previous = None
+        explicit = ranked.candidate.previous_price
+        if explicit is not None and OfferScore.number(explicit) > current:
+            raw_previous = explicit
+        elif (
+            ranked.candidate.historical_reference_price is not None
+            and OfferScore.number(ranked.candidate.historical_reference_price) > current
+        ):
+            raw_previous = ranked.candidate.historical_reference_price
+        previous = (
+            OfferScore.number(raw_previous) if raw_previous is not None else 0.0
         )
-        discount = OfferScore.discount_percent(current, previous)
+        discount = (
+            OfferScore.discount_percent(current, previous)
+            if previous > 0
+            else 0.0
+        )
         blocks = tuple(str(item) for item in operational_blocks if str(item))
         status = "blocked" if blocks else "queued"
         offer = QueueOffer(

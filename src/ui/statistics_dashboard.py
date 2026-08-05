@@ -22,6 +22,9 @@ class StatisticsDashboard(ctk.CTkFrame):
         self.owns_repository = repository is None
         self.repository = repository or StatisticsRepository(database.db)
         self.summary_labels = {}
+        self.category_limit = 10
+        self.evolution_period = 7
+        self.snapshot = None
         self.create_interface()
         self.refresh()
 
@@ -100,8 +103,23 @@ class StatisticsDashboard(ctk.CTkFrame):
         self.sent_categories_text = self.create_text_panel(
             lower, "Categorias mais enviadas"
         )
+        self.category_toggle = ctk.CTkButton(
+            parent, text="Ver todas", width=100,
+            command=self.toggle_categories,
+        )
+        self.category_toggle.pack(anchor="e", padx=8, pady=(0, 8))
 
     def create_evolution(self, parent):
+        filters = ctk.CTkFrame(parent, fg_color="transparent")
+        filters.pack(fill="x", padx=8, pady=(8, 0))
+        self.evolution_buttons = {}
+        for text, period in (("7 dias", 7), ("30 dias", 30), ("Total", None)):
+            button = ctk.CTkButton(
+                filters, text=text, width=85,
+                command=lambda value=period: self.set_evolution_period(value),
+            )
+            button.pack(side="left", padx=(0, 5))
+            self.evolution_buttons[period] = button
         self.evolution_text = ctk.CTkTextbox(parent)
         self.evolution_text.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -131,7 +149,7 @@ class StatisticsDashboard(ctk.CTkFrame):
 
     def refresh(self):
         try:
-            snapshot = self.repository.snapshot()
+            snapshot = self.repository.snapshot(self.category_limit)
         except Exception as error:
             self.status_label.configure(
                 text=f"Falha na consulta: {self.safe_text(error)}"
@@ -155,6 +173,8 @@ class StatisticsDashboard(ctk.CTkFrame):
         self.fill_coverage(snapshot)
         self.fill_evolution(snapshot)
         self.fill_recent(snapshot)
+        self.snapshot = snapshot
+        self.highlight_evolution_period()
         self.status_label.configure(
             text=f"Atualizado às {snapshot.generated_at.astimezone():%H:%M:%S}"
         )
@@ -188,9 +208,10 @@ class StatisticsDashboard(ctk.CTkFrame):
         self.coverage_summary.insert("end", "\n".join(lines))
 
     def fill_evolution(self, snapshot):
+        limit = self.evolution_period
         sections = (
-            ("Coletas por dia", snapshot.daily_collections),
-            ("Envios por dia", snapshot.daily_sends),
+            ("Coletas por dia", snapshot.daily_collections[-limit:] if limit else snapshot.daily_collections),
+            ("Envios por dia", snapshot.daily_sends[-limit:] if limit else snapshot.daily_sends),
             ("Coletas por semana", snapshot.weekly_collections),
             ("Envios por semana", snapshot.weekly_sends),
         )
@@ -206,6 +227,25 @@ class StatisticsDashboard(ctk.CTkFrame):
             lines.append("")
         self.evolution_text.delete("1.0", "end")
         self.evolution_text.insert("end", "\n".join(lines).rstrip())
+
+    def set_evolution_period(self, period):
+        self.evolution_period = period
+        self.highlight_evolution_period()
+        if self.snapshot is not None:
+            self.fill_evolution(self.snapshot)
+
+    def highlight_evolution_period(self):
+        for period, button in self.evolution_buttons.items():
+            button.configure(
+                fg_color="#287a45" if period == self.evolution_period else "#3b4654"
+            )
+
+    def toggle_categories(self):
+        self.category_limit = 1000 if self.category_limit == 10 else 10
+        self.category_toggle.configure(
+            text="Mostrar top 10" if self.category_limit > 10 else "Ver todas"
+        )
+        self.refresh()
 
     def fill_recent(self, snapshot):
         for item in self.recent_tree.get_children():

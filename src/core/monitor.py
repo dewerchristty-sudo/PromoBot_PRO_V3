@@ -45,6 +45,13 @@ class MonitorRunner:
         self.notifier = Notifier(database)
         self.notification_lock = threading.Lock()
         self.execution_lock = threading.Lock()
+        self.state_lock = threading.RLock()
+        self.current_monitor_id = None
+        self.current_monitor_term = ""
+        self.current_execution_started_at = None
+        self.last_activity_at = None
+        self.last_activity_message = ""
+        self.next_loop_check_at = None
         self.supervisor_thread = None
         self.health = {
             "monitor": "parado",
@@ -133,6 +140,15 @@ class MonitorRunner:
         with self.execution_lock:
             return self._run_once_unlocked()
 
+    def run_monitor_once(self, monitoramento):
+
+        if not self.execution_lock.acquire(blocking=False):
+            raise RuntimeError("Já existe uma execução de monitoramento em andamento.")
+        try:
+            return self.execute_monitoring(monitoramento)
+        finally:
+            self.execution_lock.release()
+
     def _run_once_unlocked(self):
 
         self.process_transactional_retries()
@@ -164,10 +180,17 @@ class MonitorRunner:
                 )
                 self.log(f"Erro no monitoramento: {error}")
 
+            with self.state_lock:
+                self.next_loop_check_at = (
+                    datetime.now()
+                    + timedelta(seconds=self.SCHEDULER_POLL_SECONDS)
+                )
             self.stop_event.wait(self.SCHEDULER_POLL_SECONDS)
 
         self.running = False
         self.health["monitor"] = "parado"
+        with self.state_lock:
+            self.next_loop_check_at = None
 
     def run_due_batch(self):
 
@@ -411,6 +434,10 @@ class MonitorRunner:
             termo,
             lojas_configuradas,
         )
+        with self.state_lock:
+            self.current_monitor_id = monitoramento["id"]
+            self.current_monitor_term = termo
+            self.current_execution_started_at = datetime.now()
         manager = None
         try:
             manager = StoreManager(
@@ -444,6 +471,26 @@ class MonitorRunner:
             raise
         finally:
             self.close_store_resources(manager)
+            with self.state_lock:
+                self.current_monitor_id = None
+                self.current_monitor_term = ""
+                self.current_execution_started_at = None
+
+    def status_snapshot(self):
+
+        with self.state_lock:
+            thread_alive = bool(self.thread and self.thread.is_alive())
+            return {
+                "automatic_running": bool(self.running and thread_alive),
+                "execution_in_progress": self.execution_lock.locked(),
+                "current_monitor_id": self.current_monitor_id,
+                "current_monitor_term": self.current_monitor_term,
+                "current_execution_started_at": self.current_execution_started_at,
+                "last_activity_at": self.last_activity_at,
+                "last_activity_message": self.last_activity_message,
+                "next_loop_check_at": self.next_loop_check_at,
+                "last_cycle": self.health.get("last_cycle"),
+            }
 
     @staticmethod
     def close_store_resources(manager):
@@ -601,6 +648,9 @@ class MonitorRunner:
     def log(self, message):
 
         print(message)
+        with self.state_lock:
+            self.last_activity_at = datetime.now()
+            self.last_activity_message = str(message)
 
         if self.progress_callback:
             self.progress_callback(message)

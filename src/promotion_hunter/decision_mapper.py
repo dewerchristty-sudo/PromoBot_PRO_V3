@@ -46,6 +46,7 @@ class DecisionMapper:
         )
         queue_status = str(self._get(diagnostic, "queue_status", "") or "")
         candidate = self._get(analysis, "candidate")
+        identity = self._get(analysis, "identity")
         delivery_payload = {
             "title": self._get(candidate, "title", product.title),
             "store": self._get(candidate, "store", product.store),
@@ -63,6 +64,16 @@ class DecisionMapper:
                 or self._get(candidate, "product_link", "")
                 or product.url
             ),
+            "category": product.category,
+            "search_term": product.search_term,
+            "breadcrumb": product.breadcrumb,
+            "original_category": product.original_category,
+            "classification_source": product.classification_source,
+            "profile_id": product.profile_id,
+            "promotion_signature": self._get(
+                identity, "promotion_signature", ""
+            ),
+            "duplicate_type": self._get(diagnostic, "duplicate_type", ""),
         }
 
         reasons = tuple(filter(None, (
@@ -88,6 +99,14 @@ class DecisionMapper:
                 item for item in self.PENDING_REASON_PRIORITY
                 if item in tokens
             )
+            if reason == "link_afiliado_ausente":
+                reason = next(
+                    (
+                        str(item) for item in operational_blocks
+                        if str(item).startswith("link_afiliado_ausente:")
+                    ),
+                    reason,
+                )
         elif operational_blocks:
             status = DecisionStatus.DISCARDED
             reason = str(operational_blocks[0])

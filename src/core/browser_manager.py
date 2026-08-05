@@ -42,6 +42,11 @@ class BrowserManager:
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
+                "--no-proxy-server",
+                "--disable-features=TranslateUI,OptimizationHints",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--ignore-certificate-errors",
             ]
 
             if self.headless:

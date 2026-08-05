@@ -10,6 +10,7 @@ from src.price_history.money import money
 
 from .contracts import PromotionSource
 from .models import NormalizedProduct
+from .categories import CATEGORY_KEYWORDS, classify_category
 
 
 class ProductNormalizer:
@@ -77,6 +78,23 @@ class ProductNormalizer:
         if not key_part:
             raise ValueError("Produto sem identidade normalizável")
         key = f"{store.strip().casefold()}:{key_part}"
+        explicit_category = str(self._value(
+            product, "categoria_manual", "categoria", "category"
+        )).strip()
+        search_term = str(source.configuration.get("keyword") or source.display_name)
+        profile_id = str(source.configuration.get("profile_id") or "").strip()
+        source_category = str(
+            source.configuration.get("canonical_category") or ""
+        ).strip()
+        category = (
+            source_category if source_category in CATEGORY_KEYWORDS
+            else explicit_category if explicit_category in CATEGORY_KEYWORDS else ""
+        )
+        classification_source = "profile" if source_category == category else (
+            "collector" if category else ""
+        )
+        if not category:
+            category, classification_source = classify_category(title, search_term)
         return NormalizedProduct(
             deduplication_key=key,
             store=store,
@@ -86,9 +104,14 @@ class ProductNormalizer:
             image_url=str(self._value(
                 product, "imagem", "image", "image_url", "imagem_url"
             )),
-            category=str(self._value(
-                product, "categoria_manual", "categoria", "category"
+            category=category,
+            search_term=search_term,
+            breadcrumb=str(self._value(product, "breadcrumb")),
+            original_category=str(self._value(
+                product, "categoria_original", "original_category"
             )),
+            classification_source=classification_source,
+            profile_id=profile_id,
             current_price=self._money_number(self._value(
                 product, "preco_atual", "current_price", "preco"
             )),

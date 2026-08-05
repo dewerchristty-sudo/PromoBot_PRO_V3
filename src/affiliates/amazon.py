@@ -84,11 +84,20 @@ class AmazonAffiliateProvider(AffiliateProvider):
         parsed = urlparse(original_url)
         if not self.valid_domain(original_url) or parsed.hostname == "amzn.to":
             return "", "", "url_original_amazon_nao_expansivel"
-        query = [
-            (key, value) for key, value in parse_qsl(parsed.query)
-            if key.casefold() != "tag"
-        ]
-        query.append(("tag", tag))
-        return urlunparse(parsed._replace(
-            query=urlencode(query)
-        )), "associate_tag", ""
+        asin_match = re.search(
+            r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)",
+            parsed.path,
+            re.I,
+        )
+        if not asin_match:
+            return "", "", "asin_ausente_na_url_amazon"
+        asin = asin_match.group(1).upper()
+        canonical = urlunparse((
+            "https",
+            "www.amazon.com.br",
+            f"/dp/{asin}",
+            "",
+            urlencode({"tag": tag}),
+            "",
+        ))
+        return canonical, "associate_tag", ""

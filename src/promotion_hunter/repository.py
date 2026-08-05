@@ -31,7 +31,53 @@ class PromotionHunterRepository:
             migrations = sorted(migration_dir.glob("*.sql"))
             for migration in migrations:
                 self.conn.executescript(migration.read_text(encoding="utf-8"))
+            self._ensure_delivery_schema()
             self.conn.commit()
+
+    def _ensure_delivery_schema(self):
+        columns = {
+            row["name"] for row in self.conn.execute(
+                "PRAGMA table_info(promotion_hunter_delivery_queue)"
+            )
+        }
+        additions = {
+            "category": "TEXT NOT NULL DEFAULT ''",
+            "search_term": "TEXT NOT NULL DEFAULT ''",
+            "breadcrumb": "TEXT NOT NULL DEFAULT ''",
+            "original_category": "TEXT NOT NULL DEFAULT ''",
+            "classification_source": "TEXT NOT NULL DEFAULT ''",
+            "promotion_signature": "TEXT NOT NULL DEFAULT ''",
+            "profile_id": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                self.conn.execute(
+                    f"ALTER TABLE promotion_hunter_delivery_queue "
+                    f"ADD COLUMN {name} {definition}"
+                )
+        self.conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_hunter_queue_product_status
+            ON promotion_hunter_delivery_queue(product_key, status, approved_at);
+            CREATE TABLE IF NOT EXISTS promotion_hunter_destination_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id INTEGER NOT NULL,
+                product_key TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                attempt_id INTEGER,
+                attempted_at TEXT NOT NULL,
+                request_made INTEGER NOT NULL DEFAULT 0,
+                http_status INTEGER,
+                returned_status TEXT NOT NULL DEFAULT '',
+                evolution_status TEXT NOT NULL DEFAULT '',
+                accepted INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(queue_id) REFERENCES promotion_hunter_delivery_queue(id),
+                UNIQUE(queue_id, destination, attempted_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_hunter_receipts_completed
+            ON promotion_hunter_destination_receipts(queue_id, destination, accepted);
+        """)
 
     def close(self) -> None:
         self.conn.close()
@@ -186,8 +232,10 @@ class PromotionHunterRepository:
                 INSERT INTO promotion_hunter_delivery_queue(
                     product_key, run_id, title, store, current_price,
                     previous_price, image_url, product_url, source_ids_json,
-                    pipeline_status, approved_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    pipeline_status, approved_at, category, search_term,
+                    breadcrumb, original_category, classification_source,
+                    promotion_signature, profile_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     product.deduplication_key, run_id,
@@ -199,23 +247,48 @@ class PromotionHunterRepository:
                     payload.get("product_url") or product.url,
                     json.dumps(product.source_ids, ensure_ascii=False),
                     decision.status.value, now,
+                    payload.get("category") or product.category,
+                    payload.get("search_term") or product.search_term,
+                    payload.get("breadcrumb") or product.breadcrumb,
+                    payload.get("original_category") or product.original_category,
+                    payload.get("classification_source") or product.classification_source,
+                    str(payload.get("promotion_signature") or ""),
+                    str(payload.get("profile_id") or product.profile_id or ""),
                 ),
             )
             self.conn.commit()
             return int(cursor.lastrowid)
 
-    def queue_items(self, statuses=("pending",), limit=100):
+    def queue_items(
+        self, statuses=("pending",), limit=100, max_attempts=None,
+        after=None, run_id=None, approved_since=None,
+    ):
         placeholders = ",".join("?" for _ in statuses)
+        params: list = [*statuses]
+        sql = f"""
+            SELECT * FROM promotion_hunter_delivery_queue
+            WHERE status IN ({placeholders})
+            """
+        if max_attempts is not None:
+            sql += " AND attempts < ?\n"
+            params.append(int(max_attempts))
+        if run_id is not None:
+            sql += " AND run_id=?\n"
+            params.append(str(run_id))
+        if approved_since is not None:
+            sql += " AND approved_at >= ?\n"
+            params.append(str(approved_since))
+        if after is not None:
+            approved_at, queue_id = after
+            sql += (
+                " AND (approved_at > ? OR "
+                "(approved_at = ? AND id > ?))\n"
+            )
+            params.extend((approved_at, approved_at, int(queue_id)))
+        sql += " ORDER BY approved_at, id\n LIMIT ?"
+        params.append(int(limit))
         with self.lock:
-            return tuple(self.conn.execute(
-                f"""
-                SELECT * FROM promotion_hunter_delivery_queue
-                WHERE status IN ({placeholders})
-                ORDER BY approved_at, id
-                LIMIT ?
-                """,
-                (*statuses, int(limit)),
-            ).fetchall())
+            return tuple(self.conn.execute(sql, params).fetchall())
 
     def recently_sent(self, product_key, since):
         with self.lock:
@@ -227,6 +300,58 @@ class PromotionHunterRepository:
                 """,
                 (product_key, since),
             ).fetchone()
+
+    def active_or_recent(self, product_key, since, max_attempts=3):
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT * FROM promotion_hunter_delivery_queue
+                WHERE product_key=? AND (
+                    status IN ('pending','sending')
+                    OR (status='failed' AND attempts < ?)
+                    OR (status='sent' AND sent_at>=?)
+                )
+                ORDER BY CASE status
+                    WHEN 'sent' THEN 0 WHEN 'sending' THEN 1
+                    WHEN 'pending' THEN 2 ELSE 3 END, id
+                LIMIT 1
+                """,
+                (product_key, int(max_attempts), since),
+            ).fetchone()
+
+    def completed_destinations(self, queue_id):
+        with self.lock:
+            return tuple(row[0] for row in self.conn.execute(
+                """
+                SELECT DISTINCT destination
+                FROM promotion_hunter_destination_receipts
+                WHERE queue_id=? AND accepted=1
+                """,
+                (int(queue_id),),
+            ).fetchall())
+
+    def record_destination_results(self, queue_id, product_key, attempt_id, results):
+        rows = [(
+            int(queue_id), str(product_key), str(item.destination),
+            int(attempt_id), str(item.attempted_at), int(bool(item.request_made)),
+            item.http_status, str(item.returned_status or ""),
+            str(item.evolution_status or ""), int(bool(item.accepted)),
+            str(item.error or "")[:300],
+        ) for item in results]
+        if not rows:
+            return
+        with self.lock:
+            self.conn.executemany(
+                """
+                INSERT OR IGNORE INTO promotion_hunter_destination_receipts(
+                    queue_id, product_key, destination, attempt_id,
+                    attempted_at, request_made, http_status, returned_status,
+                    evolution_status, accepted, error_message
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                rows,
+            )
+            self.conn.commit()
 
     def start_attempt(self, queue_id, started_at):
         with self.lock:
@@ -250,8 +375,59 @@ class PromotionHunterRepository:
             self.conn.commit()
             return int(cursor.lastrowid)
 
-    def finish_attempt(self, queue_id, attempt_id, status, finished_at, error=""):
-        queue_status = "sent" if status == "sent" else "failed"
+    def start_controlled_attempt(self, queue_id, destination, started_at):
+        """Reserva atomicamente um unico ID sem consultar o backlog."""
+        with self.lock:
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+                row = self.conn.execute(
+                    "SELECT status FROM promotion_hunter_delivery_queue WHERE id=?",
+                    (int(queue_id),),
+                ).fetchone()
+                if row is None:
+                    raise LookupError(f"Queue ID inexistente: {queue_id}")
+                if row["status"] != "pending":
+                    raise RuntimeError(
+                        f"Queue ID {queue_id} nao esta pending: {row['status']}"
+                    )
+                completed = self.conn.execute(
+                    """SELECT 1 FROM promotion_hunter_destination_receipts
+                       WHERE queue_id=? AND destination=? AND accepted=1 LIMIT 1""",
+                    (int(queue_id), str(destination)),
+                ).fetchone()
+                if completed:
+                    raise RuntimeError("Destino ja possui recibo concluido.")
+                cursor = self.conn.execute(
+                    """UPDATE promotion_hunter_delivery_queue
+                       SET status='sending', attempts=attempts+1,
+                           last_attempt_at=?, updated_at=?
+                       WHERE id=? AND status='pending'""",
+                    (started_at, started_at, int(queue_id)),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Reserva controlada recusada.")
+                attempt = self.conn.execute(
+                    """INSERT INTO promotion_hunter_delivery_attempts(
+                           queue_id, started_at, status
+                       ) VALUES(?,?,'sending')""",
+                    (int(queue_id), started_at),
+                )
+                self.conn.commit()
+                return int(attempt.lastrowid)
+            except Exception:
+                if self.conn.in_transaction:
+                    self.conn.rollback()
+                raise
+
+    def finish_attempt(
+        self, queue_id, attempt_id, status, finished_at, error="",
+        permanent=False,
+    ):
+        queue_status = (
+            "sent" if status == "sent" else
+            "cancelled" if permanent else
+            "failed"
+        )
         with self.lock:
             self.conn.execute(
                 """

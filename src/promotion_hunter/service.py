@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from uuid import uuid4
@@ -10,6 +11,9 @@ from .models import HunterRunResult, NormalizedProduct, SourceRunResult
 from .normalization import ProductNormalizer
 from .registry import CollectorRegistry
 from .repository import PromotionHunterRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class PromotionHunterService:
@@ -36,6 +40,27 @@ class PromotionHunterService:
         run_id = uuid4().hex
         started_at = datetime.now(timezone.utc)
         self.repository.start_run(run_id, started_at.isoformat())
+        try:
+            return self._run_started(sources, run_id, started_at)
+        except Exception:
+            try:
+                self.repository.finish_run(
+                    run_id,
+                    "failed",
+                    0,
+                    0,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:
+                logger.exception("Falha ao finalizar run interrompida do Hunter")
+            raise
+
+    def _run_started(
+        self,
+        sources: Iterable[PromotionSource],
+        run_id: str,
+        started_at: datetime,
+    ) -> HunterRunResult:
         source_runs: list[SourceRunResult] = []
         unique: dict[str, NormalizedProduct] = {}
         collected_count = 0

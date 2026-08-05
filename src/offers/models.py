@@ -58,9 +58,10 @@ class OfferCandidate:
                 "current_price",
                 product.get("preco_valor", product.get("preco")),
             ),
-            previous_price=product.get(
-                "previous_price",
-                product.get("preco_antigo"),
+            previous_price=(
+                product.get("previous_price")
+                or product.get("preco_anterior")
+                or product.get("preco_antigo")
             ),
             historical_reference_price=product.get(
                 "historical_reference_price",

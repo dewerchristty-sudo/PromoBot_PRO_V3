@@ -8,6 +8,10 @@ from src.core.notifier import Notifier
 from src.core.startup import configure_startup, startup_enabled
 from src.core.store_manager import StoreManager
 from src.core.whatsapp_control import WhatsAppControl
+from src.promotion_hunter.config import (
+    ACCELERATED_MODE_KEY,
+    operational_settings,
+)
 
 
 class SettingsPage(ctk.CTkFrame):
@@ -18,6 +22,9 @@ class SettingsPage(ctk.CTkFrame):
         self.notifier = Notifier(database)
         self.whatsapp_control = WhatsAppControl()
         self.start_with_windows = tk.BooleanVar(value=startup_enabled())
+        self.accelerated_mode = tk.BooleanVar(
+            value=operational_settings(database.db).accelerated
+        )
         self.qr_window = None
         self.qr_ctk_image = None
         self.catalog_analysis = None
@@ -39,6 +46,27 @@ class SettingsPage(ctk.CTkFrame):
             variable=self.start_with_windows,
             command=self.toggle_startup,
         ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 16))
+        hunter = ctk.CTkFrame(self)
+        hunter.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(
+            hunter,
+            text="Promotion Hunter",
+            font=("Arial", 16, "bold"),
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+        self.accelerated_switch = ctk.CTkSwitch(
+            hunter,
+            text="Modo de teste acelerado: DESLIGADO",
+            variable=self.accelerated_mode,
+            command=self.toggle_accelerated_mode,
+        )
+        self.accelerated_switch.pack(anchor="w", padx=16, pady=(2, 4))
+        self.accelerated_warning = ctk.CTkLabel(
+            hunter,
+            text="Mantém os valores normais de produção.",
+            text_color="#aeb6c1",
+        )
+        self.accelerated_warning.pack(anchor="w", padx=16, pady=(0, 14))
+        self.refresh_accelerated_status()
 
         conexao = ctk.CTkFrame(self)
         conexao.pack(fill="x", padx=20, pady=10)
@@ -204,6 +232,31 @@ class SettingsPage(ctk.CTkFrame):
         self._set_catalog_buttons(True)
         self.catalog_status.configure(text=f"Falha na limpeza: {message}")
         messagebox.showerror("Limpeza inteligente", message)
+
+    def refresh_accelerated_status(self):
+        enabled = bool(self.accelerated_mode.get())
+        self.accelerated_switch.configure(
+            text=(
+                "Modo de teste acelerado: LIGADO"
+                if enabled else "Modo de teste acelerado: DESLIGADO"
+            )
+        )
+        self.accelerated_warning.configure(
+            text=(
+                "Modo de teste acelerado ativo. Os ciclos e envios "
+                "ocorrerão com maior frequência."
+                if enabled else "Mantém os valores normais de produção."
+            ),
+            text_color="#f2c14e" if enabled else "#aeb6c1",
+        )
+
+    def toggle_accelerated_mode(self):
+        enabled = bool(self.accelerated_mode.get())
+        self.database.salvar_configuracao_app(
+            ACCELERATED_MODE_KEY,
+            "true" if enabled else "false",
+        )
+        self.refresh_accelerated_status()
 
     def toggle_startup(self):
         try:

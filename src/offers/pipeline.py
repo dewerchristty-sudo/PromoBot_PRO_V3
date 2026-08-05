@@ -10,7 +10,7 @@ from uuid import uuid4
 from src.database.offer_pipeline_repository import OfferPipelineRepository
 from src.affiliates import AffiliateManager
 
-from .duplicates import DuplicateChecker
+from .duplicates import DuplicateChecker, PersistentDuplicateHistoryStore
 from .history import OfferHistory
 from .models import (
     DuplicateCheckResult,
@@ -111,7 +111,10 @@ class OfferPipeline:
                 store=repository,
                 policy=self.analysis_policy,
             ),
-            duplicate_checker=DuplicateChecker(policy=self.analysis_policy),
+            duplicate_checker=DuplicateChecker(
+                store=PersistentDuplicateHistoryStore(repository),
+                policy=self.analysis_policy,
+            ),
             analysis_policy=self.analysis_policy,
         )
         self.queue = queue or OfferQueue(repository, self.scheduler_policy)

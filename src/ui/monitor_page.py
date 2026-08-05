@@ -1,20 +1,41 @@
 import math
 import os
 import sqlite3
-import subprocess
 import threading
 import tkinter as tk
-from datetime import datetime, timedelta
-from tkinter import messagebox
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tkinter import messagebox, simpledialog
 
 import customtkinter as ctk
+from src.ui.hunter_statistics_panel import HunterStatisticsPanel
 
 from src.core.monitor import MonitorRunner
 from src.core.store_manager import StoreManager
+from src.promotion_hunter.process_lock import HunterProcessLock
+from src.promotion_hunter.official_runtime import OfficialHunterController
+from src.promotion_hunter.profiles import PROFILES
+from src.promotion_hunter.live_start import LiveStartPreflight
+from src.promotion_hunter.config import (
+    ACCELERATED_MODE_KEY,
+    operational_settings,
+)
 
 
 class HunterStatusReader:
     """Leitura somente-leitura do estado real do Promotion Hunter."""
+
+    ACTIVE_RUN_MAX_AGE = timedelta(minutes=20)
+    SCHEDULER_HEARTBEAT_MAX_AGE = timedelta(minutes=40)
+
+    @staticmethod
+    def _last_hour_condition(column):
+        """Compara instantes, não a representação textual dos timestamps."""
+        return f"julianday({column}) >= julianday(?, '-1 hour')"
+
+    @staticmethod
+    def _time_reference(now=None):
+        return "now" if now is None else now
 
     @staticmethod
     def _hunter_db():
@@ -34,39 +55,59 @@ class HunterStatusReader:
         try:
             return {
                 "scheduler": cls._scheduler_state(),
-                "last_run": cls._last_run(),
+                "last_run": cls._last_completed_run(),
+                "current_run": cls._current_run(),
                 "pipeline": cls._pipeline_stats(),
                 "deliveries": cls._delivery_stats(),
                 "process_active": cls._is_process_active(),
                 "live_delivery": cls._live_delivery(),
                 "blocked_group": cls._blocked_group(),
+                "profiles": cls._profile_stats(),
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
             }
         except Exception:
             return None
 
     @classmethod
-    def _scheduler_state(cls):
+    def _scheduler_state(cls, now=None):
         try:
             conn = cls._hunter_db()
             row = conn.execute(
-                "SELECT running FROM promotion_hunter_scheduler_state WHERE singleton_id=1"
+                "SELECT running, last_error, updated_at "
+                "FROM promotion_hunter_scheduler_state WHERE singleton_id=1"
             ).fetchone()
             conn.close()
-            db_running = bool(row["running"]) if row else False
         except Exception:
-            db_running = False
+            row = None
 
-        process_active = cls._is_process_active()
-        recent = cls._recent_run_seconds()
+        if not cls._is_process_active():
+            return "stopped"
+        if not row or not bool(row["running"]) or not cls._timestamp_is_recent(
+            row["updated_at"], cls.SCHEDULER_HEARTBEAT_MAX_AGE, now
+        ):
+            return "degraded"
+        return "degraded" if row["last_error"] else "active"
 
-        if process_active and recent is not None and recent < 1200:
-            return "active"
-        if process_active:
-            return "active"
-        if db_running:
-            return "active"
-        return "stopped"
+    @staticmethod
+    def _utc_datetime(value):
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _timestamp_is_recent(cls, value, maximum_age, now=None):
+        if not value:
+            return False
+        try:
+            reference = cls._utc_datetime(now or datetime.now(timezone.utc))
+            age = reference - cls._utc_datetime(value)
+            return timedelta(0) <= age <= maximum_age
+        except (TypeError, ValueError):
+            return False
 
     @classmethod
     def _recent_run_seconds(cls):
@@ -85,27 +126,17 @@ class HunterStatusReader:
 
     @classmethod
     def _is_process_active(cls):
-        try:
-            _flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-Process python* -ErrorAction SilentlyContinue | "
-                 "Where-Object { $_.CommandLine -like '*_start_multi_store*' } | "
-                 "Select-Object -First 1"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=_flags,
-            )
-            return "python" in result.stdout.lower()
-        except Exception:
-            return False
+        return HunterProcessLock.is_locked()
 
     @classmethod
-    def _last_run(cls):
+    def _last_completed_run(cls):
+        """Último run concluído (exclui runs em andamento)."""
         try:
             conn = cls._hunter_db()
             row = conn.execute(
                 "SELECT status, collected_count, unique_count, started_at, finished_at "
-                "FROM promotion_hunter_runs ORDER BY started_at DESC LIMIT 1"
+                "FROM promotion_hunter_runs WHERE status != 'running' "
+                "ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             conn.close()
             if not row:
@@ -117,6 +148,45 @@ class HunterStatusReader:
                 "started": row["started_at"],
                 "finished": row["finished_at"],
                 "duration": cls._duration(row["started_at"], row["finished_at"]),
+            }
+        except Exception:
+            return None
+
+    @classmethod
+    def _current_run(cls, now=None):
+        """Run em andamento (status='running'), se existir."""
+        try:
+            conn = cls._hunter_db()
+            row = conn.execute(
+                "SELECT status, collected_count, unique_count, started_at, finished_at "
+                "FROM promotion_hunter_runs WHERE status = 'running' "
+                "ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if not row:
+                return None
+            started = row["started_at"]
+            if not cls._timestamp_is_recent(
+                started, cls.ACTIVE_RUN_MAX_AGE, now
+            ) or cls._scheduler_state(now) != "active":
+                return None
+            elapsed = None
+            if started:
+                try:
+                    reference = cls._utc_datetime(
+                        now or datetime.now(timezone.utc)
+                    )
+                    seconds = (
+                        reference - cls._utc_datetime(started)
+                    ).total_seconds()
+                    elapsed = f"{seconds:.0f}s" if seconds < 60 else f"{seconds/60:.1f}min"
+                except Exception:
+                    pass
+            return {
+                "status": row["status"],
+                "collected": row["collected_count"],
+                "started": started,
+                "elapsed": elapsed,
             }
         except Exception:
             return None
@@ -136,14 +206,16 @@ class HunterStatusReader:
             return None
 
     @classmethod
-    def _pipeline_stats(cls):
+    def _pipeline_stats(cls, now=None):
         try:
             conn = cls._pipeline_db()
             row = conn.execute(
                 "SELECT SUM(received_count) as recv, SUM(valid_count) as valid, "
                 "SUM(approved_count) as approved, SUM(blocked_count) as blocked, "
                 "SUM(duplicate_count) as dups, SUM(discarded_count) as disc "
-                "FROM offer_pipeline_runs WHERE created_at > datetime('now', '-1 hour')"
+                "FROM offer_pipeline_runs WHERE "
+                + cls._last_hour_condition("created_at"),
+                (cls._time_reference(now),),
             ).fetchone()
             conn.close()
             if not row:
@@ -160,27 +232,84 @@ class HunterStatusReader:
             return None
 
     @classmethod
-    def _delivery_stats(cls):
+    def _delivery_stats(cls, now=None):
+        conn = None
         try:
             conn = cls._hunter_db()
             sent = conn.execute(
                 "SELECT COUNT(*) as cnt FROM promotion_hunter_delivery_queue "
-                "WHERE status='sent' AND sent_at > datetime('now', '-1 hour')"
+                "WHERE status='sent' AND "
+                + cls._last_hour_condition("sent_at"),
+                (cls._time_reference(now),),
             ).fetchone()["cnt"]
             attempts = conn.execute(
                 "SELECT COUNT(*) as cnt FROM promotion_hunter_delivery_attempts "
-                "WHERE started_at > datetime('now', '-1 hour')"
+                "WHERE " + cls._last_hour_condition("started_at"),
+                (cls._time_reference(now),),
             ).fetchone()["cnt"]
-            conn.close()
-            return {"sent_hour": int(sent), "attempts_hour": int(attempts)}
+            result = {"sent_hour": int(sent), "attempts_hour": int(attempts)}
+            try:
+                pending = int(conn.execute(
+                    "SELECT COUNT(*) as cnt FROM promotion_hunter_delivery_queue "
+                    "WHERE status='pending'"
+                ).fetchone()["cnt"])
+                accepted = int(conn.execute(
+                    "SELECT COUNT(*) as cnt FROM "
+                    "promotion_hunter_destination_receipts WHERE accepted=1 AND "
+                    + cls._last_hour_condition("created_at"),
+                    (cls._time_reference(now),),
+                ).fetchone()["cnt"])
+                result.update(pending=pending, accepted_hour=accepted)
+            except sqlite3.Error:
+                # Bancos legados ainda exibem os contadores historicos disponiveis.
+                pass
+            return result
         except Exception:
             return None
+        finally:
+            if conn is not None:
+                conn.close()
 
     @classmethod
     def _live_delivery(cls):
         return os.getenv("PROMOTION_HUNTER_LIVE_DELIVERY", "false").strip().casefold() in (
             "true", "1", "yes", "on"
         )
+
+    @classmethod
+    def _profile_stats(cls):
+        result = {}
+        try:
+            conn = cls._hunter_db()
+            for profile in PROFILES:
+                source_row = conn.execute(
+                    """SELECT COUNT(*) sources, MAX(sr.finished_at) last_cycle,
+                    COALESCE(SUM(sr.returned_count),0) found
+                    FROM promotion_hunter_sources s
+                    LEFT JOIN promotion_hunter_source_runs sr ON sr.source_id=s.source_id
+                    WHERE json_extract(s.configuration_json,'$.profile_id')=?""",
+                    (profile.profile_id,),
+                ).fetchone()
+                queue_row = conn.execute(
+                    """SELECT COUNT(*) enqueued,
+                    COALESCE(SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END),0) sent,
+                    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0) errors
+                    FROM promotion_hunter_delivery_queue WHERE profile_id=?""",
+                    (profile.profile_id,),
+                ).fetchone()
+                result[profile.profile_id] = {
+                    "sources": int(source_row["sources"] or 0),
+                    "last_cycle": source_row["last_cycle"],
+                    "found": int(source_row["found"] or 0),
+                    "approved": int(queue_row["enqueued"] or 0),
+                    "enqueued": int(queue_row["enqueued"] or 0),
+                    "sent": int(queue_row["sent"] or 0),
+                    "errors": int(queue_row["errors"] or 0),
+                }
+            conn.close()
+        except (sqlite3.Error, OSError):
+            return {}
+        return result
 
     @classmethod
     def _blocked_group(cls):
@@ -300,6 +429,18 @@ class MonitorPage(ctk.CTkFrame):
         self.previous_cards_snapshot = None
         self.countdown_labels = {}
         self.summary_values = {}
+        self.statistics_open = False
+        self._hunter_controller = OfficialHunterController()
+        self._hunter_mode = "stopped"
+        self._hunter_started_at = None
+        self._live_preflight_factory = LiveStartPreflight
+        self._monitor_pack_state = []
+        self.accelerated_mode = tk.BooleanVar(
+            value=operational_settings(database.db).accelerated
+        )
+        self.profile_enabled = {
+            profile.profile_id: tk.BooleanVar(value=True) for profile in PROFILES
+        }
 
         lojas_padrao = set(StoreManager.default_store_names())
         for nome in (
@@ -365,6 +506,30 @@ class MonitorPage(ctk.CTkFrame):
             )
             value.pack(padx=5, pady=(0, 4))
             self.hunter_values[key] = value
+
+        self.profile_values = {}
+        self.profile_switches = {}
+        profile_status = ctk.CTkFrame(self.hunter_frame, fg_color="transparent")
+        profile_status.pack(fill="x", padx=6, pady=(0, 6))
+        for column, profile in enumerate(PROFILES):
+            profile_status.grid_columnconfigure(column, weight=1)
+            card = ctk.CTkFrame(profile_status, fg_color="#192719")
+            card.grid(row=0, column=column, sticky="nsew", padx=2)
+            switch = ctk.CTkSwitch(
+                card, text=profile.label, font=("Arial", 11, "bold"),
+                text_color="#8fdf8f",
+                variable=self.profile_enabled[profile.profile_id],
+            )
+            switch.pack(padx=6, pady=(4, 0))
+            value = ctk.CTkLabel(
+                card,
+                text="Status: ATIVO | Fontes: 0 | Último ciclo: —\n"
+                     "Encontrados: 0 | Aprovados: 0 | Enfileirados: 0 | Enviados: 0 | Erros: 0",
+                font=("Arial", 10), justify="left",
+            )
+            value.pack(padx=6, pady=(0, 4))
+            self.profile_values[profile.profile_id] = value
+            self.profile_switches[profile.profile_id] = switch
 
         self.summary_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.summary_frame.pack(fill="x", padx=20, pady=(0, 5))
@@ -461,9 +626,17 @@ class MonitorPage(ctk.CTkFrame):
             automatic_controls, fg_color="transparent"
         )
         automatic_buttons.pack(padx=8, pady=(2, 6))
-        ctk.CTkButton(
-            automatic_buttons, text="▶ Iniciar", width=80, command=self.iniciar
-        ).pack(side="left", padx=(0, 4))
+        self.analysis_start_button = ctk.CTkButton(
+            automatic_buttons, text="Iniciar Análise", width=120,
+            command=self.iniciar_analise,
+        )
+        self.analysis_start_button.pack(side="left", padx=(0, 4))
+        self.live_start_button = ctk.CTkButton(
+            automatic_buttons, text="Iniciar LIVE", width=105,
+            fg_color="#9b1c1c", hover_color="#c62828",
+            command=self.iniciar_live,
+        )
+        self.live_start_button.pack(side="left", padx=(0, 4))
         ctk.CTkButton(
             automatic_buttons, text="⏸ Parar", width=80, command=self.parar
         ).pack(side="left", padx=(0, 4))
@@ -474,6 +647,39 @@ class MonitorPage(ctk.CTkFrame):
             command=self.executar_agora,
         )
         self.run_all_button.pack(side="left")
+        ctk.CTkLabel(
+            automatic_controls,
+            text=("Análise coleta e aprova sem enviar. "
+                  "LIVE exige autorização e confirmação."),
+            text_color="#b8c1cc", font=("Arial", 10),
+        ).pack(anchor="w", padx=8, pady=(0, 5))
+
+        test_mode_controls = ctk.CTkFrame(controls, fg_color="#24282f")
+        test_mode_controls.pack(side="left", fill="y", padx=5)
+        ctk.CTkLabel(
+            test_mode_controls,
+            text="MODO DE TESTE",
+            font=("Arial", 12, "bold"),
+        ).pack(anchor="w", padx=8, pady=(4, 0))
+        test_mode_row = ctk.CTkFrame(
+            test_mode_controls, fg_color="transparent"
+        )
+        test_mode_row.pack(fill="x", padx=8, pady=(2, 0))
+        ctk.CTkLabel(test_mode_row, text="Modo acelerado").pack(side="left")
+        self.accelerated_switch = ctk.CTkSwitch(
+            test_mode_row,
+            text="DESLIGADO",
+            variable=self.accelerated_mode,
+            command=self.toggle_accelerated_mode,
+            width=105,
+        )
+        self.accelerated_switch.pack(side="left", padx=(8, 0))
+        self.accelerated_indicator = ctk.CTkLabel(
+            test_mode_controls, text="Modo normal", text_color="#9ba4af",
+            font=("Arial", 11, "bold"),
+        )
+        self.accelerated_indicator.pack(anchor="w", padx=8, pady=(0, 5))
+        self.refresh_accelerated_control()
 
         management_controls = ctk.CTkFrame(controls, fg_color="#24282f")
         management_controls.pack(side="left", fill="y", padx=5)
@@ -529,21 +735,34 @@ class MonitorPage(ctk.CTkFrame):
         )
         self.selection_label.pack(fill="x", padx=8, pady=(0, 4))
 
-        self.activity_toggle_button = ctk.CTkButton(
+        self.open_statistics_button = ctk.CTkButton(
             self,
-            text="▼ Mostrar atividade da sessão",
-            height=28,
-            fg_color="#303640",
-            hover_color="#3a424e",
-            command=self.toggle_activity,
+            text="ABRIR ESTATÍSTICAS DO CAÇADOR",
+            height=36,
+            font=("Arial", 13, "bold"),
+            fg_color="#287a45",
+            hover_color="#23693c",
+            command=self.open_hunter_statistics,
         )
-        self.activity_toggle_button.pack(fill="x", padx=20, pady=(0, 4))
+        self.open_statistics_button.pack(fill="x", padx=20, pady=(0, 8))
 
-        self.activity_panel = ctk.CTkFrame(self)
+        self.hunter_statistics = HunterStatisticsPanel(
+            self,
+            self.database,
+            on_back=self.close_hunter_statistics,
+            on_tab_change=self._statistics_tab_changed,
+        )
+
+        self.activity_panel = ctk.CTkFrame(
+            self.hunter_statistics.pages["Atividade"]
+        )
+        self.activity_panel.pack(
+            fill="both", expand=True, padx=18, pady=(0, 16)
+        )
         activity_header = ctk.CTkFrame(
             self.activity_panel, fg_color="transparent"
         )
-        activity_header.pack(fill="x", padx=8, pady=(6, 0))
+        activity_header.pack(fill="x", padx=8, pady=(8, 0))
         ctk.CTkLabel(
             activity_header,
             text="Atividade da sessão",
@@ -556,14 +775,15 @@ class MonitorPage(ctk.CTkFrame):
             command=self.clear_activity,
         ).pack(side="right")
         self.activity = ctk.CTkTextbox(
-            self.activity_panel, wrap="word", height=110
+            self.activity_panel, wrap="word"
         )
-        self.activity.pack(fill="x", padx=8, pady=8)
+        self.activity.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.cards = ctk.CTkScrollableFrame(
-            self, label_text="Monitores cadastrados"
+            self.hunter_statistics.pages["Monitores"],
+            label_text="Monitores cadastrados",
         )
-        self.cards.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        self.cards.pack(fill="both", expand=True, padx=18, pady=(0, 16))
 
     def telemetry_for(self, monitor_id):
         service = self.runner.telemetry_service
@@ -571,7 +791,78 @@ class MonitorPage(ctk.CTkFrame):
             return None
         return service.latest_monitor_result(monitor_id)
 
+    def refresh_accelerated_control(self):
+        enabled = bool(self.accelerated_mode.get())
+        self.accelerated_switch.configure(
+            text="LIGADO" if enabled else "DESLIGADO"
+        )
+        self.accelerated_indicator.configure(
+            text=(
+                "⚡ Modo de teste acelerado ativo"
+                if enabled else "Modo normal"
+            ),
+            text_color="#63d471" if enabled else "#9ba4af",
+        )
+
+    def toggle_accelerated_mode(self):
+        enabled = bool(self.accelerated_mode.get())
+        self.database.salvar_configuracao_app(
+            ACCELERATED_MODE_KEY,
+            "true" if enabled else "false",
+        )
+        self.refresh_accelerated_control()
+
+    def open_hunter_statistics(self):
+        if self.statistics_open:
+            return
+        self._monitor_pack_state = []
+        for widget in tuple(self.pack_slaves()):
+            if widget is self.hunter_statistics:
+                continue
+            options = dict(widget.pack_info())
+            options.pop("in", None)
+            self._monitor_pack_state.append((widget, options))
+            widget.pack_forget()
+        self.statistics_open = True
+        self.hunter_statistics.pack(
+            fill="both", expand=True, padx=12, pady=12
+        )
+        self.hunter_statistics.select("Resumo")
+        self.hunter_statistics.refresh()
+
+    def close_hunter_statistics(self):
+        if not self.statistics_open:
+            return
+        self.hunter_statistics.pack_forget()
+        for widget, options in self._monitor_pack_state:
+            widget.pack(**options)
+        self._monitor_pack_state = []
+        self.statistics_open = False
+        self.activity_expanded = False
+
+    def _statistics_tab_changed(self, tab):
+        self.activity_expanded = tab == "Atividade"
+        if self.activity_expanded:
+            self.refresh_activity_widget()
+        if tab == "Monitores":
+            self.carregar()
+
     def carregar(self):
+        statistics_open = (
+            getattr(self, "statistics_open", False)
+            and hasattr(self, "hunter_statistics")
+        )
+        monitors_visible = (
+            statistics_open
+            and self.hunter_statistics.selected_tab == "Monitores"
+        )
+        if statistics_open:
+            try:
+                self.hunter_statistics.refresh()
+            except Exception as error:
+                self.append_activity(f"Estatísticas indisponíveis: {error}")
+            if not monitors_visible:
+                return
         monitors = list(self.database.listar_monitoramentos())
         telemetry_by_id = {
             item["id"]: self.telemetry_for(item["id"])
@@ -592,13 +883,13 @@ class MonitorPage(ctk.CTkFrame):
             self.previous_visual_snapshot = visual_snapshot
         else:
             self.update_updated_time()
-        if cards_snapshot != self.previous_cards_snapshot:
+        if monitors_visible and cards_snapshot != self.previous_cards_snapshot:
             scroll_position = self.get_scroll_position()
             self.render_cards(snapshot)
             self.restore_scroll_position(scroll_position)
             self.previous_cards_snapshot = cards_snapshot
             self.update_id_action(show_missing=False)
-        else:
+        elif monitors_visible:
             self.update_countdown_labels()
 
     def build_visual_snapshot(self, monitors, snapshot, telemetry_by_id):
@@ -695,29 +986,56 @@ class MonitorPage(ctk.CTkFrame):
             self.hunter_values["hunter_scheduler"].configure(text="Erro")
             self.hunter_values["hunter_status"].configure(text="Indisponível")
             return
+        for profile in PROFILES:
+            label = getattr(self, "profile_values", {}).get(profile.profile_id)
+            if not label:
+                continue
+            snapshot = data.get("profiles", {}).get(profile.profile_id, {})
+            enabled = self.profile_enabled[profile.profile_id].get()
+            label.configure(
+                text=f"Status: {'ATIVO' if enabled else 'DESATIVADO'} | "
+                     f"Fontes: {snapshot.get('sources', 0)} | Último ciclo: "
+                     f"{snapshot.get('last_cycle') or '—'}\n"
+                     f"Encontrados: {snapshot.get('found', 0)} | "
+                     f"Aprovados: {snapshot.get('approved', 0)} | "
+                     f"Enfileirados: {snapshot.get('enqueued', 0)} | "
+                     f"Enviados: {snapshot.get('sent', 0)} | "
+                     f"Erros: {snapshot.get('errors', 0)}"
+            )
+            switch = self.profile_switches.get(profile.profile_id)
+            if switch:
+                switch.configure(state="disabled" if self._is_promotion_hunter_active() else "normal")
 
         # Scheduler
         sched_state = data["scheduler"]
         sched_display = {
             "active": "✅ ATIVO",
+            "degraded": "⚠️ DEGRADADO",
             "stopped": "⏸ PARADO",
         }.get(sched_state, f"❓ {sched_state}")
         self.hunter_values["hunter_scheduler"].configure(text=sched_display)
 
-        # Promotion Hunter
-        if data["process_active"]:
-            self.hunter_values["hunter_status"].configure(text="🟢 Executando")
+        # Promotion Hunter (baseado no run atual)
+        current = data.get("current_run")
+        if current:
+            elapsed = current.get("elapsed") or ""
+            self.hunter_values["hunter_status"].configure(
+                text=f"🟢 Executando\n⏱ {elapsed}"
+            )
+        elif data["scheduler"] in {"active", "degraded"}:
+            waiting = "⚠️ Aguardando" if data["scheduler"] == "degraded" else "Aguardando"
+            self.hunter_values["hunter_status"].configure(text=waiting)
         else:
-            self.hunter_values["hunter_status"].configure(text="Aguardando")
+            self.hunter_values["hunter_status"].configure(text="⏸ Parado")
 
         # Lojas e fontes
         stores_text = "ML: 17\nAmazon: 7\nShopee: 6\nTotal: 30 fontes"
         self.hunter_values["hunter_stores"].configure(text=stores_text)
 
-        # Último ciclo
+        # Último ciclo (concluído)
         last = data["last_run"]
         if last:
-            status_icon = {"success": "✅", "failed": "❌"}.get(last["status"], "❓")
+            status_icon = {"success": "✅", "failed": "❌", "partial_success": "⚠️"}.get(last["status"], "❓")
             duration = last.get("duration") or ""
             last_text = (
                 f"{status_icon} {last['collected']} coleta.\n"
@@ -744,17 +1062,48 @@ class MonitorPage(ctk.CTkFrame):
         # Entregas
         dl = data["deliveries"]
         if dl:
-            dl_text = f"Enviadas: {dl['sent_hour']}\nTentat.: {dl['attempts_hour']}"
+            mode = getattr(self, "_hunter_mode", "stopped")
+            if "pending" in dl and "accepted_hour" in dl:
+                queue_label = "Fila LIVE" if mode == "live" else "Fila análise"
+                dl_text = (
+                    f"{queue_label}: {dl['pending']}\n"
+                    f"Tentat.: {dl['attempts_hour']}\n"
+                    f"Evolution: {dl['accepted_hour']}\n"
+                    f"Enviadas: {dl['sent_hour']}"
+                )
+            else:
+                dl_text = (
+                    f"Tentat.: {dl['attempts_hour']}\n"
+                    f"Enviadas: {dl['sent_hour']}"
+                )
         else:
             dl_text = "—"
         self.hunter_values["hunter_delivery"].configure(text=dl_text)
 
         # Seguranca
-        live = "LIVE: ✅" if data["live_delivery"] else "LIVE: ❌OFF"
-        sched = "Sched: ✅" if data["scheduler"] == "active" else "Sched: ❌"
-        self.hunter_values["hunter_security"].configure(
-            text=f"{live}\n{sched}"
+        mode = getattr(self, "_hunter_mode", "stopped")
+        live_active = mode == "live" and data["live_delivery"]
+        if live_active:
+            security = "MODO: LIVE\nLIVE: ON\nENVIO: AUTORIZADO"
+            security_color = "#ff6b6b"
+        elif mode == "analysis_only":
+            security = "MODO: ANÁLISE\nLIVE: OFF\nENVIO: BLOQUEADO"
+            security_color = "#f5c26b"
+        else:
+            security = "MODO: PARADO\nLIVE: OFF\nENVIO: BLOQUEADO"
+            security_color = "#d0d0d0"
+        sched = (
+            "Sched: ✅"
+            if data["scheduler"] in {"active", "degraded"}
+            else "Sched: ❌"
         )
+        try:
+            self.hunter_values["hunter_security"].configure(
+                text=f"{security}\n{sched}", text_color=security_color,
+            )
+        except TypeError:
+            # Compatibilidade com widgets/test doubles sem suporte a text_color.
+            self.hunter_values["hunter_security"].configure(text=f"{security}\n{sched}")
 
         # Grupo bloqueado
         self.hunter_values["hunter_blocked"].configure(
@@ -791,6 +1140,12 @@ class MonitorPage(ctk.CTkFrame):
         result_label, error = self.presenter.last_result(telemetry)
         card = ctk.CTkFrame(self.cards, fg_color="#262b32")
         card.pack(fill="x", padx=5, pady=5)
+        card.bind(
+            "<Button-1>",
+            lambda _event, identifier=monitor_id: self.select_monitor(
+                identifier
+            ),
+        )
         header = ctk.CTkFrame(card, fg_color="transparent")
         header.pack(fill="x", padx=10, pady=(8, 2))
         ctk.CTkLabel(
@@ -966,22 +1321,6 @@ class MonitorPage(ctk.CTkFrame):
             self.carregar()
             self.schedule_refresh()
 
-    def toggle_activity(self):
-        self.activity_expanded = not self.activity_expanded
-        if self.activity_expanded:
-            self.activity_toggle_button.configure(
-                text="▲ Ocultar atividade da sessão"
-            )
-            self.activity_panel.pack(fill="x", padx=20, pady=(0, 6))
-            self.cards.pack_forget()
-            self.cards.pack(fill="both", expand=True, padx=20, pady=(0, 10))
-            self.refresh_activity_widget()
-        else:
-            self.activity_toggle_button.configure(
-                text="▼ Mostrar atividade da sessão"
-            )
-            self.activity_panel.pack_forget()
-
     def adicionar(self):
         lojas = self.lojas_selecionadas()
         if not lojas:
@@ -1003,13 +1342,145 @@ class MonitorPage(ctk.CTkFrame):
         self.termo.delete(0, "end")
         self.carregar()
 
+    def select_monitor(self, monitor_id):
+        """Sincroniza a seleção da lista com os controles do Monitor."""
+        self.id_entry.delete(0, "end")
+        self.id_entry.insert(0, str(monitor_id))
+        self.update_id_action(show_missing=False)
+
     def iniciar(self):
+        """Compatibilidade: o controle historico permanece analysis_only."""
+        return self.iniciar_analise()
+
+    def iniciar_analise(self):
         self.runner.start()
+        options = {}
+        if hasattr(self, "profile_enabled"):
+            options["enabled_profiles"] = self.enabled_profile_ids()
+        self._iniciar_promotion_hunter(mode="analysis_only", **options)
         self.carregar()
 
-    def parar(self):
-        self.runner.stop(wait=False)
+    def enabled_profile_ids(self):
+        variables = getattr(self, "profile_enabled", None)
+        if not variables:
+            return tuple(profile.profile_id for profile in PROFILES)
+        return tuple(key for key, variable in variables.items() if variable.get())
+
+    def iniciar_live(self):
+        controller = getattr(self, "_hunter_controller", None)
+        database_path = Path(getattr(self.database, "db", "promobot.db"))
+        hunter_path = database_path.resolve().parent / "promotion_hunter.db"
+        guard = self._live_preflight_factory(
+            database_path=hunter_path,
+            app_database_path=database_path,
+        )
+        result = guard.run(controller_running=bool(
+            controller is not None and controller.running
+        ))
+        if not result.allowed:
+            messagebox.showerror(
+                "Envio real bloqueado",
+                "Para habilitar o modo LIVE, as duas autorizações operacionais "
+                "e todas as validações precisam estar ativas.\n\n"
+                + "\n".join(f"• {item}" for item in result.errors)
+                + "\n\nNenhuma alteração foi realizada.",
+            )
+            self.append_activity("LIVE bloqueado: " + "; ".join(result.errors))
+            self._hunter_mode = "stopped"
+            self.carregar()
+            return False
+        details = result.details
+        pending_total = details.get("pending_total", 0)
+        pending_session = details.get("pending_session", 0)
+        pending_backlog = details.get("pending_backlog", 0)
+        session_info = ""
+        if pending_total > 0:
+            session_info = (
+                f"\nFila da sessao atual: {pending_session} ofertas\n"
+            )
+            if pending_backlog > 0:
+                session_info += f"Backlog antigo (ignorado): {pending_backlog} ofertas\n"
+        warning = (
+            "ATENÇÃO — ENVIO REAL\n\n"
+            "O PromoBot poderá enviar ofertas reais aos grupos configurados.\n\n"
+            "Modo: LIVE\nLojas ativas: Amazon\n"
+            f"Máximo por ciclo: {details['max_per_cycle']}\n"
+            f"Máximo por sessão: {details['max_per_session']}\n"
+            f"Intervalo entre mensagens: {details['minimum_interval_seconds']}s\n"
+            f"Destinos configurados: {len(details['destinations'])}\n"
+            "Review automático: DESATIVADO\n"
+            f"Grupo bloqueado: {details['blocked_group'] or 'nenhum'}\n"
+            f"{session_info}\n"
+            "Cancelar é a opção segura. Deseja continuar?"
+        )
+        if not messagebox.askokcancel(
+            "ATENÇÃO — ENVIO REAL", warning, default="cancel"
+        ):
+            return False
+        token = simpledialog.askstring(
+            "Confirmar e iniciar LIVE",
+            "Digite exatamente INICIAR LIVE para confirmar:", parent=self,
+        )
+        if token != "INICIAR LIVE":
+            messagebox.showwarning(
+                "LIVE cancelado",
+                "Frase de confirmação incorreta. Nada foi iniciado.",
+            )
+            return False
+        self.runner.start()
+        live_options = dict(
+            limit=1, max_messages=1, per_store=1, stores=("Amazon",),
+            max_session_messages=2,
+        )
+        if hasattr(self, "profile_enabled"):
+            live_options.update(
+                interval=30, enabled_profiles=self.enabled_profile_ids()
+            )
+        started = self._iniciar_promotion_hunter(mode="live", **live_options)
         self.carregar()
+        return bool(started)
+
+    def parar(self):
+        self._parar_promotion_hunter()
+        self.runner.stop(wait=False)
+        self._hunter_mode = "stopped"
+        self._hunter_started_at = None
+        self.carregar()
+
+    def _iniciar_promotion_hunter(self, mode="analysis_only", **options):
+        if self._is_promotion_hunter_active():
+            self.append_activity("Promotion Hunter ja esta ativo - ignorando.")
+            return False
+        try:
+            controller = getattr(self, "_hunter_controller", None)
+            if controller is None:
+                controller = OfficialHunterController()
+                self._hunter_controller = controller
+            controller.start(mode=mode, **options)
+            self._hunter_mode = mode
+            self._hunter_started_at = datetime.now().isoformat()
+            self.append_activity(
+                f"Promotion Hunter iniciado em processo, modo {mode}."
+            )
+            return True
+        except Exception as exc:
+            self.append_activity(f"Erro ao iniciar Promotion Hunter: {exc}")
+            self._hunter_mode = "stopped"
+            return False
+
+    def _parar_promotion_hunter(self):
+        controller = getattr(self, "_hunter_controller", None)
+        if controller is not None:
+            controller.stop()
+            self.append_activity("Promotion Hunter encerrado; mutex liberado.")
+        self._hunter_mode = "stopped"
+        self._hunter_started_at = None
+
+    def _is_promotion_hunter_active(self):
+        controller = getattr(self, "_hunter_controller", None)
+        if controller is not None and controller.running:
+            return True
+        return HunterStatusReader._is_process_active()
 
     def executar_agora(self):
         if self.general_execution_active or self.runner.execution_lock.locked():

@@ -128,8 +128,8 @@ class OfferIntelligenceService:
             candidate,
             historical_reference_price=(
                 history_result.maximum
-                if history_result.sample_count
-                else candidate.historical_reference_price
+                if history_result.sample_count >= 2  # precisa de ao menos uma observação anterior
+                else None  # primeira observação não serve como referência do próprio ciclo
             ),
             historical_minimum=(
                 history_result.minimum

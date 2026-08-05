@@ -25,6 +25,11 @@ class NormalizedProduct:
     url: str = ""
     image_url: str = ""
     category: str = ""
+    search_term: str = ""
+    breadcrumb: str = ""
+    original_category: str = ""
+    classification_source: str = ""
+    profile_id: str = ""
     current_price: float | None = None
     previous_price: float | None = None
     discount_percent: float | None = None
@@ -52,6 +57,11 @@ class NormalizedProduct:
             "url": self.url,
             "imagem": self.image_url,
             "categoria_manual": self.category,
+            "termo": self.search_term,
+            "breadcrumb": self.breadcrumb,
+            "categoria_original": self.original_category,
+            "origem_classificacao": self.classification_source,
+            "profile_id": self.profile_id,
             "preco_atual": self.current_price,
             "preco_anterior": self.previous_price,
             "desconto_percentual": self.discount_percent,

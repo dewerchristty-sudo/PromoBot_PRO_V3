@@ -249,7 +249,7 @@ class StatisticsRepository:
         )
         return discount, savings
 
-    def snapshot(self):
+    def snapshot(self, category_limit=10):
         total_products = self._count("produtos")
         total_sends = (
             self._count("historico_envios", "status = 'enviado'")
@@ -290,8 +290,8 @@ class StatisticsRepository:
             weekly_sends=self.time_series(
                 "historico_envios", "data", weekly=True
             ),
-            products_by_category=self.product_categories(),
-            sent_categories=self.sent_categories(),
+            products_by_category=self.product_categories(category_limit),
+            sent_categories=self.sent_categories(category_limit),
             average_discount=discount,
             average_savings=savings,
         )

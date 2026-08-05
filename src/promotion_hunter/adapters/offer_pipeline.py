@@ -36,6 +36,7 @@ class PromotionHunterOfferPipelineAdapter:
         payload["previous_price"] = previous_price
         payload["savings"] = product.get("economia")
         payload["discount_percent"] = product.get("desconto_percentual")
+        payload["profile_id"] = product.get("profile_id", "")
         return payload
 
     def process_batch(self, products):
@@ -49,13 +50,19 @@ class PromotionHunterOfferPipelineAdapter:
             closer()
 
 
-def build_controlled_offer_pipeline(database_path):
+def build_controlled_offer_pipeline(database_path, affiliate_config=None):
+    from src.affiliates import AffiliateManager
     from src.database.offer_pipeline_repository import OfferPipelineRepository
     from src.offers.pipeline import OfferPipeline
 
     repository = OfferPipelineRepository(Path(database_path))
     repository.migrate()
+    affiliate_manager = (
+        AffiliateManager(affiliate_config) if affiliate_config is not None
+        else None
+    )
     return PromotionHunterOfferPipelineAdapter(OfferPipeline(
         repository=repository,
         scheduler=InertOfferScheduler(),
+        affiliate_manager=affiliate_manager,
     ))

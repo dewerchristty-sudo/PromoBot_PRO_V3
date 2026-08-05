@@ -1,5 +1,7 @@
 import threading
 import time
+import traceback
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -21,21 +23,30 @@ from src.ui.daily_deals_page import DailyDealsPage
 from src.ui.offer_dashboard import OfferDashboard
 from src.ui.delivery_dashboard import DeliveryDashboard
 from src.ui.statistics_dashboard import StatisticsDashboard
+from src.startup_diagnostics import startup_log, thread_snapshot
 
 
 class MainWindow(ctk.CTk):
 
-    def __init__(self, database):
+    def __init__(self, database, startup_probe=False):
         super().__init__()
+        startup_log("07 MainWindow iniciada")
 
         self.database = database
+        self.startup_probe = bool(startup_probe)
         self.background_workers = set()
         self.background_workers_lock = threading.Lock()
         self.pages = {}
         self.current_page = None
         self.shutdown_clean = None
+        self._closing = False
+        self._shutdown_result = None
         self.monitor_runner = MonitorRunner(database, self.log_monitor_status)
+        startup_log("07a MonitorRunner criado")
+
         self.monitor_runner.start_supervisor()
+        startup_log("07b supervisor iniciado")
+
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -44,9 +55,15 @@ class MainWindow(ctk.CTk):
         self.geometry("1280x720")
         self.minsize(1100, 650)
 
-        self.criar_interface()
-        self.after(1000, self.iniciar_monitor_automatico)
+        # Instale o fechamento antes de construir qualquer pagina. Se uma
+        # pagina falhar, o mainloop ainda precisa iniciar para a janela poder
+        # exibir o diagnostico e aceitar o botao Fechar.
         self.protocol("WM_DELETE_WINDOW", self.fechar)
+        startup_log("08 protocolo de fechamento instalado")
+        self.criar_interface()
+        if not self.startup_probe:
+            self.after(1000, self.iniciar_monitor_automatico)
+        startup_log("09 Dashboard agendado")
 
     # ===============================================
 
@@ -73,7 +90,7 @@ class MainWindow(ctk.CTk):
             self.menu,
             text="PromoBot_PRO",
             font=("Arial", 22, "bold")
-        ).pack(pady=25)
+        ).pack(pady=(12, 8))
 
         botoes = [
 
@@ -119,9 +136,9 @@ class MainWindow(ctk.CTk):
                 self.menu,
                 text=texto,
                 width=180,
-                height=34,
+                height=24,
                 command=comando
-            ).pack(pady=3)
+            ).pack(pady=1)
 
         self.area = ctk.CTkFrame(self)
 
@@ -145,7 +162,47 @@ class MainWindow(ctk.CTk):
             sticky="ew"
         )
 
-        self.mostrar_dashboard()
+        self.after_idle(self.carregar_pagina_inicial)
+
+    def carregar_pagina_inicial(self):
+        try:
+            self.mostrar_dashboard()
+            startup_log("11 Dashboard carregado")
+            if self.startup_probe:
+                startup_log("12 probe detectado")
+                self.after(150, self._startup_probe_close)
+        except Exception as error:
+            self.registrar_erro_inicializacao(error)
+            self.limpar()
+            ctk.CTkLabel(
+                self.area,
+                text=(
+                    "Nao foi possivel abrir o Dashboard.\n\n"
+                    f"{type(error).__name__}: {error}\n\n"
+                    "Consulte logs/ui_startup_error.log."
+                ),
+                justify="left",
+                font=("Arial", 16),
+            ).pack(fill="both", expand=True, padx=30, pady=30)
+            self.status.configure(text="Falha ao abrir Dashboard")
+
+    def _startup_probe_close(self):
+        startup_log("13 fechamento solicitado", thread_snapshot())
+        self.fechar()
+
+    @staticmethod
+    def registrar_erro_inicializacao(error):
+        log_path = Path("logs") / "ui_startup_error.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as output:
+                output.write(
+                    f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"{type(error).__name__}: {error}\n"
+                )
+                output.write(traceback.format_exc())
+        except OSError:
+            pass
 
     # ===============================================
 
@@ -378,8 +435,29 @@ class MainWindow(ctk.CTk):
     # ===============================================
 
     def fechar(self):
+        if self._closing:
+            return
+        self._closing = True
+        self.status.configure(text="Encerrando...")
+        threading.Thread(target=self._shutdown_background, daemon=True).start()
+        self.after(50, self._finish_close_when_ready)
 
-        monitor_clean = self.monitor_runner.shutdown(timeout=5)
-        workers_clean = self.wait_for_background_workers(timeout=5)
-        self.shutdown_clean = monitor_clean and workers_clean
+    def _shutdown_background(self):
+        startup_log("14 shutdown iniciado", thread_snapshot())
+        try:
+            monitor_clean = self.monitor_runner.shutdown(timeout=5)
+            startup_log("15 scheduler parado", f"monitor_clean={monitor_clean}")
+            workers_clean = self.wait_for_background_workers(timeout=5)
+            self._shutdown_result = monitor_clean and workers_clean
+            startup_log("16 mutex liberado", f"workers_clean={workers_clean}")
+        except Exception as error:
+            self.registrar_erro_inicializacao(error)
+            self._shutdown_result = False
+
+    def _finish_close_when_ready(self):
+        if self._shutdown_result is None:
+            self.after(50, self._finish_close_when_ready)
+            return
+        self.shutdown_clean = self._shutdown_result
+        startup_log("17 destroy executado", f"clean={self.shutdown_clean}")
         self.destroy()

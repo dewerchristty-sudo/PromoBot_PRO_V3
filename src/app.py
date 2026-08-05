@@ -4,13 +4,20 @@ from src.ui.main_window import MainWindow
 
 class PromoBot:
 
-    def __init__(self) -> None:
+    def __init__(self, db_path=None, startup_probe=False) -> None:
 
-        self.database = Database()
+        from src.startup_diagnostics import startup_log
+        startup_log("06g PromoBot.init iniciado")
 
-        self.app = MainWindow(self.database)
+
+        self.database = Database(db_path)
+        startup_log("06h Database criado")
+
+        self.app = MainWindow(self.database, startup_probe=startup_probe)
+        startup_log("06i MainWindow criada")
 
         self.integrar()
+        startup_log("06j PromoBot.init concluido")
 
     # =========================================
 

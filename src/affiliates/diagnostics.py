@@ -14,7 +14,7 @@ from .validation import (
 
 SAMPLE_URLS = {
     "Mercado Livre": "https://produto.mercadolivre.com.br/MLB-987654321",
-    "Amazon": "https://www.amazon.com.br/dp/B0SAFE98765",
+    "Amazon": "https://www.amazon.com.br/dp/B0SAFE9876",
     "Shopee": "https://shopee.com.br/produto-i.98765.43210",
 }
 

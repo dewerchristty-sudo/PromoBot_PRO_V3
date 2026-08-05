@@ -1,12 +1,23 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import sys
 
 from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def runtime_env_path() -> Path:
+    """Locate the external configuration for source and frozen runtimes."""
+    configured = os.getenv("PROMOBOT_ENV_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if bool(getattr(sys, "frozen", False)):
+        return Path(sys.executable).resolve().parent / ".env"
+    return DEFAULT_ENV_PATH.resolve()
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +42,7 @@ class AffiliateConfig:
 
     @classmethod
     def from_environment(cls):
-        env_path = DEFAULT_ENV_PATH.resolve()
+        env_path = runtime_env_path()
         load_dotenv(dotenv_path=env_path, override=False)
 
         def store(prefix):

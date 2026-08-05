@@ -44,6 +44,23 @@ class InMemoryDuplicateHistoryStore(DuplicateHistoryStore):
         ]
 
 
+class PersistentDuplicateHistoryStore(DuplicateHistoryStore):
+    """Adapta o repositório do pipeline ao contrato de deduplicação.
+
+    O repositório é responsável pela transação e pelo armazenamento. Assim o
+    checker continua independente de SQLite e pode ser testado em memória.
+    """
+
+    def __init__(self, repository):
+        self.repository = repository
+
+    def add(self, offer: PreviousOffer) -> None:
+        self.repository.add_duplicate_offer(offer)
+
+    def recent(self, since: datetime) -> list[PreviousOffer]:
+        return self.repository.recent_duplicate_offers(since)
+
+
 class DuplicateChecker:
 
     def __init__(

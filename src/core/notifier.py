@@ -29,6 +29,7 @@ from src.core.retry_policy import TransactionalRetryPolicy
 from src.core.transactional_canary import TransactionalCanaryConfig
 from src.database.delivery_repository import DeliveryRepository
 from src.stores.active import is_active_store
+from src.stores.amazon_images import amazon_image_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -1652,7 +1653,7 @@ class Notifier:
         if not image_url:
             return []
         host = (urlparse(image_url).hostname or "").casefold()
-        candidates = []
+        candidates = amazon_image_candidates((image_url,))
         if host == "susercontent.com" or host.endswith(".susercontent.com"):
             original = re.sub(
                 r"@resize_[^/?#]+(?=(?:[?#]|$))",
@@ -1662,81 +1663,121 @@ class Notifier:
                 flags=re.IGNORECASE,
             )
             if original != image_url:
-                candidates.append(original)
+                candidates.insert(0, original)
         candidates.append(image_url)
         return list(dict.fromkeys(candidates))
 
     def download_image(self, image_url):
-        last_error = None
-        for candidate in self.best_image_url_candidates(image_url):
-            response = None
-            try:
-                response = requests.get(
-                    candidate,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 Chrome/124 Safari/537.36"
-                        ),
-                        "Referer": "https://shopee.com.br/",
-                        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
-                    },
-                    stream=True,
-                    timeout=(10, 30),
+        candidate = str(image_url or "").strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("A URL da imagem deve usar HTTP ou HTTPS.")
+        normalized_path = parsed.path.casefold().replace("_", "-")
+        rejected_markers = (
+            "placeholder", "no-image", "image-unavailable", "imagem-indisponivel",
+            "amazon-logo", "transparent-pixel", "spacer.gif",
+        )
+        if any(marker in normalized_path for marker in rejected_markers):
+            raise ValueError("A URL aponta para placeholder ou imagem generica.")
+
+        host = parsed.hostname.casefold()
+        if host == "media-amazon.com" or host.endswith(".media-amazon.com") \
+                or host == "images-amazon.com" or host.endswith(".images-amazon.com"):
+            referer = "https://www.amazon.com.br/"
+        elif host == "susercontent.com" or host.endswith(".susercontent.com"):
+            referer = "https://shopee.com.br/"
+        else:
+            referer = f"{parsed.scheme}://{parsed.netloc}/"
+
+        response = None
+        try:
+            response = requests.get(
+                candidate,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Referer": referer,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                },
+                stream=True,
+                timeout=(10, 30),
+                allow_redirects=True,
+            )
+            if response.status_code != 200:
+                raise ValueError(
+                    f"A imagem respondeu com HTTP {response.status_code}."
                 )
-                if response.status_code != 200:
-                    raise ValueError(
-                        f"A imagem respondeu com HTTP {response.status_code}."
-                    )
-                content_type = str(
-                    response.headers.get("Content-Type") or ""
-                ).casefold()
-                if not content_type.startswith("image/"):
-                    raise ValueError(
-                        "A URL informada nao retornou conteudo de imagem."
-                    )
-                content_length = response.headers.get("Content-Length")
-                if content_length:
-                    try:
-                        declared_size = int(content_length)
-                    except (TypeError, ValueError):
-                        declared_size = 0
-                    if declared_size > self.MAX_MANUAL_IMAGE_BYTES:
-                        raise ValueError("A imagem excede o limite de 15 MiB.")
-                content = bytearray()
-                for chunk in response.iter_content(64 * 1024):
-                    if not chunk:
-                        continue
-                    content.extend(chunk)
-                    if len(content) > self.MAX_MANUAL_IMAGE_BYTES:
-                        raise ValueError("A imagem excede o limite de 15 MiB.")
-                if not content:
-                    raise ValueError("O arquivo de imagem esta vazio.")
-                return candidate, bytes(content)
-            except requests.Timeout as error:
-                last_error = ValueError(
-                    "O download da imagem excedeu o tempo limite."
+            content_type = str(
+                response.headers.get("Content-Type") or ""
+            ).split(";", 1)[0].strip().casefold()
+            if not content_type.startswith("image/"):
+                raise ValueError(
+                    "A URL informada nao retornou conteudo de imagem."
                 )
-                last_error.__cause__ = error
-            except requests.ConnectionError as error:
-                last_error = ValueError(
-                    "Nao foi possivel conectar ao servidor da imagem."
-                )
-                last_error.__cause__ = error
-            except (requests.RequestException, ValueError) as error:
-                last_error = (
-                    error
-                    if isinstance(error, ValueError)
-                    else ValueError(f"Falha ao baixar a imagem: {error}")
-                )
-            finally:
-                if response is not None:
-                    response.close()
-        raise last_error or ValueError("Nao foi possivel baixar a imagem.")
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    declared_size = int(content_length)
+                except (TypeError, ValueError):
+                    declared_size = 0
+                if declared_size > self.MAX_MANUAL_IMAGE_BYTES:
+                    raise ValueError("A imagem excede o limite de 15 MiB.")
+            content = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                if not chunk:
+                    continue
+                content.extend(chunk)
+                if len(content) > self.MAX_MANUAL_IMAGE_BYTES:
+                    raise ValueError("A imagem excede o limite de 15 MiB.")
+            if not content:
+                raise ValueError("O arquivo de imagem esta vazio.")
+            resolved_url = getattr(response, "url", None)
+            if not isinstance(resolved_url, str) or not resolved_url:
+                resolved_url = candidate
+            self.last_image_download_diagnostic = {
+                "requested_url": candidate,
+                "resolved_url": resolved_url,
+                "content_type": content_type,
+                "bytes": len(content),
+            }
+            logger.info(
+                "Imagem validada: requested=%s resolved=%s type=%s bytes=%s",
+                candidate, resolved_url, content_type, len(content),
+            )
+            return resolved_url, bytes(content)
+        except requests.Timeout as error:
+            raise ValueError(
+                "O download da imagem excedeu o tempo limite."
+            ) from error
+        except requests.ConnectionError as error:
+            raise ValueError(
+                f"Nao foi possivel conectar ao servidor da imagem ({host}): "
+                f"{error}"
+            ) from error
+        except requests.RequestException as error:
+            raise ValueError(f"Falha ao baixar a imagem: {error}") from error
+        finally:
+            if response is not None:
+                response.close()
 
     def prepare_whatsapp_image(self, image_url, allow_low_resolution=False):
+        last_error = None
+        for candidate in self.best_image_url_candidates(image_url):
+            try:
+                resolved_url, original = self.download_image(candidate)
+                return self._prepare_downloaded_image(
+                    resolved_url, original, allow_low_resolution
+                )
+            except (LowResolutionImageError, ValueError) as error:
+                last_error = error
+        raise last_error or ValueError("Nao foi possivel preparar a imagem.")
 
-        resolved_url, original = self.download_image(image_url)
+    def _prepare_downloaded_image(
+        self, resolved_url, original, allow_low_resolution=False
+    ):
         try:
             image = Image.open(BytesIO(original))
             image.load()
@@ -2322,6 +2363,38 @@ class Notifier:
                 self.summarize_evolution_response(response, response_json),
             )
             response.raise_for_status()
+            returned_status = ""
+            message_id = ""
+            if isinstance(response_json, dict):
+                returned_status = str(response_json.get("status") or "")
+                # Evolution API retorna message_id em diferentes estruturas:
+                # - response_json["key"]["id"]
+                # - response_json["messageId"]
+                # - response_json["id"]
+                key = response_json.get("key")
+                if isinstance(key, dict):
+                    message_id = str(key.get("id") or "")
+                if not message_id:
+                    message_id = str(
+                        response_json.get("messageId")
+                        or response_json.get("id")
+                        or ""
+                    )
+            self.last_delivery_receipt = {
+                "http_status": response.status_code,
+                "status": returned_status,
+                "message_id": message_id,
+                # HTTP 2xx/PENDING confirma aceite da API, nao entrega final.
+                "evolution_status": "aceito_pela_evolution",
+                "delivery_confirmed": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "destino": masked_destination,
+                "response_summary": (
+                    self.summarize_evolution_response(response, response_json)
+                    if response_json is not None
+                    else {}
+                ),
+            }
             return True
         except requests.HTTPError as error:
             if response is None:
@@ -2332,6 +2405,16 @@ class Notifier:
                     endpoint,
                     media_diagnostic,
                 )
+                self.last_delivery_receipt = {
+                    "http_status": None,
+                    "status": "sem_resposta",
+                    "message_id": "",
+                    "evolution_status": "falha_sem_resposta",
+                    "delivery_confirmed": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "destino": masked_destination,
+                    "response_summary": {},
+                }
             else:
                 try:
                     response_json = response.json()
@@ -2346,6 +2429,20 @@ class Notifier:
                     self.summarize_evolution_response(response, response_json),
                     media_diagnostic,
                 )
+                self.last_delivery_receipt = {
+                    "http_status": response.status_code,
+                    "status": str(response_json.get("status") or "") if isinstance(response_json, dict) else "",
+                    "message_id": "",
+                    "evolution_status": f"falha_http_{response.status_code}",
+                    "delivery_confirmed": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "destino": masked_destination,
+                    "response_summary": (
+                        self.summarize_evolution_response(response, response_json)
+                        if response_json is not None
+                        else {}
+                    ),
+                }
             summary = self.summarize_evolution_response(
                 response,
                 response_json,
@@ -2369,6 +2466,16 @@ class Notifier:
                 endpoint,
                 media_diagnostic,
             )
+            self.last_delivery_receipt = {
+                "http_status": None,
+                "status": "excecao_antes_post",
+                "message_id": "",
+                "evolution_status": "excecao_antes_envio",
+                "delivery_confirmed": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "destino": masked_destination,
+                "response_summary": {},
+            }
             raise
 
     @staticmethod

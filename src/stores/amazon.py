@@ -9,7 +9,9 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from src.affiliates.validation import product_identity
 from src.stores.base_store import BaseStore
+from src.stores.amazon_images import amazon_image_candidates_from_element
 
 
 logger = logging.getLogger(__name__)
@@ -467,6 +469,9 @@ class Amazon(BaseStore):
                     )
                     self.log_price_extraction(preco_texto, extraction)
 
+                    asin = product_identity(self.name, link)
+                    image_candidates = amazon_image_candidates_from_element(imagem)
+
                     resultado = {
 
                         "loja": self.name,
@@ -477,7 +482,11 @@ class Amazon(BaseStore):
 
                         "link": link,
 
-                        "imagem": imagem.get("src", "") if imagem else ""
+                        "imagem": image_candidates[0] if image_candidates else "",
+
+                        "image_candidates": image_candidates,
+
+                        "id": asin,
 
                     }
                     resultado["previous_price"] = extraction.value
@@ -541,13 +550,21 @@ class Amazon(BaseStore):
         price_text = self.current_price_from_soup(soup)
         image_url = ""
         if image:
-            image_url = image.get("data-old-hires") or image.get("src") or ""
+            image_candidates = amazon_image_candidates_from_element(image)
+            image_url = image_candidates[0] if image_candidates else ""
 
         og_title = soup.select_one("meta[property='og:title']")
         og_image = soup.select_one("meta[property='og:image']")
+        twitter_image = (
+            soup.select_one("meta[property='twitter:image']")
+            or soup.select_one("meta[name='twitter:image']")
+        )
         og_price = soup.select_one("meta[property='product:price:amount']")
         title_text = title_text or (og_title.get("content", "").strip() if og_title else "")
         image_url = image_url or (og_image.get("content", "").strip() if og_image else "")
+        image_url = image_url or (
+            twitter_image.get("content", "").strip() if twitter_image else ""
+        )
         price_text = price_text or (og_price.get("content", "").strip() if og_price else "")
 
         for script in soup.select("script[type='application/ld+json']"):

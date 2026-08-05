@@ -4,6 +4,7 @@ import json
 
 from src.offers.history import OfferHistory, OfferHistoryStore
 from src.offers.models import PriceObservation
+from src.offers.duplicates import PreviousOffer
 
 from .offer_repository import OfferRepository
 
@@ -19,6 +20,7 @@ class OfferPipelineRepository(OfferRepository, OfferHistoryStore):
         activation_migration_path=None,
         price_history_migration_path=None,
         real_price_history_migration_path=None,
+        duplicate_history_migration_path=None,
     ):
         super().__init__(database_path)
         self.pipeline_migration_path = (
@@ -40,6 +42,10 @@ class OfferPipelineRepository(OfferRepository, OfferHistoryStore):
         self.real_price_history_migration_path = (
             real_price_history_migration_path
             or self.migration_path.with_name("006_real_price_history.sql")
+        )
+        self.duplicate_history_migration_path = (
+            duplicate_history_migration_path
+            or self.migration_path.with_name("007_duplicate_history.sql")
         )
 
     def migrate(self):
@@ -67,7 +73,56 @@ class OfferPipelineRepository(OfferRepository, OfferHistoryStore):
                         encoding="utf-8"
                     )
                 )
+            self.conn.executescript(
+                self.duplicate_history_migration_path.read_text(
+                    encoding="utf-8"
+                )
+            )
             self.conn.commit()
+
+    def add_duplicate_offer(self, offer: PreviousOffer) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO offer_duplicate_history(
+                    identity_signature, similarity_signature,
+                    link_signature, promotion_signature, price, occurred_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    offer.identity_signature,
+                    offer.similarity_signature,
+                    offer.link_signature,
+                    offer.promotion_signature,
+                    float(offer.price),
+                    self.iso(offer.occurred_at),
+                ),
+            )
+            self.conn.commit()
+
+    def recent_duplicate_offers(self, since):
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT identity_signature, similarity_signature,
+                       link_signature, promotion_signature, price, occurred_at
+                FROM offer_duplicate_history
+                WHERE occurred_at >= ?
+                ORDER BY occurred_at DESC
+                """,
+                (self.iso(since),),
+            ).fetchall()
+        return [
+            PreviousOffer(
+                identity_signature=row["identity_signature"],
+                similarity_signature=row["similarity_signature"],
+                link_signature=row["link_signature"],
+                promotion_signature=row["promotion_signature"],
+                price=float(row["price"]),
+                occurred_at=datetime.fromisoformat(row["occurred_at"]),
+            )
+            for row in rows
+        ]
 
     def add(self, observation: PriceObservation) -> bool:
         price = float(observation.price or 0)

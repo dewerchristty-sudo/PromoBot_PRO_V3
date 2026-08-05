@@ -41,16 +41,35 @@ class OfferReadinessEnricher:
                 value.get("preco_valor", value.get("preco")),
             )
         )
-        previous = OfferScore.number(
-            value.get("previous_price", value.get("preco_antigo"))
+        previous_raw = (
+            value.get("previous_price")
+            or value.get("preco_anterior")
+            or value.get("preco_antigo")
         )
-        discount = OfferScore.discount_percent(current, previous)
+        previous = OfferScore.number(previous_raw) if previous_raw else None
+        # Não inventar preço anterior: None/0 → desconhecido
+        if previous is not None and previous <= 0:
+            previous = None
+        discount = (
+            OfferScore.discount_percent(current, previous)
+            if previous is not None and previous > 0
+            else None
+        )
         required = store_key in self.AFFILIATE_REQUIRED
         blocks = []
         if not original:
             blocks.append("link_original_ausente")
         if required and not affiliate:
             blocks.append("link_afiliado_ausente")
+            store_reason = re.sub(r"[^a-z0-9]+", "_", store_key).strip("_")
+            exact_reason = (
+                affiliate_result.error
+                or affiliate_result.status.casefold()
+                or "link_oficial_indisponivel"
+            )
+            blocks.append(
+                f"link_afiliado_ausente:{store_reason}:{exact_reason}"
+            )
         if not image:
             blocks.append("imagem_ausente")
         future = dict(value.get("future_signals") or {})
@@ -72,7 +91,7 @@ class OfferReadinessEnricher:
             "previous_price": previous,
             "discount_percent": discount,
             "discount_source": (
-                "preco_anterior_anunciado" if discount > 0 else "indisponivel"
+                "preco_anterior_anunciado" if (discount or 0) > 0 else "indisponivel"
             ),
             "price_status": "VALID" if current > 0 else "INVALID",
             "currency": "BRL",
